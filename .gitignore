@@ -1,0 +1,30 @@
+# Keil / ARMCC build outputs
+Output/
+Project/Listings/
+*.axf
+*.hex
+*.map
+*.o
+*.d
+*.crf
+*.dep
+*.lnp
+*.sct
+*.htm
+*.build_log.htm
+
+# Keil user/session files
+*.uvguix.*
+*.uvgui.*
+*.uvopt
+*.uvoptx
+*.bak
+
+# Editor files
+.vscode/ipch/
+*.suo
+*.user
+
+# OS files
+Thumbs.db
+Desktop.ini
