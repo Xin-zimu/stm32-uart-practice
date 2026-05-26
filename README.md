@@ -216,3 +216,127 @@ Project/led.uvprojx
 - `User/app_ui.h`
 - `User/joystick.c`
 - `User/joystick.h`
+
+## 串口通信学习计划
+
+建议按 5 个阶段练习，每个阶段都用串口助手验证一次。
+
+### 第 1 阶段：认识 USB 转 TTL 和 USART
+
+目标：
+
+- 分清 USB、TTL、USART/UART 的关系。
+- 会交叉接线：USB-TTL 的 `TXD` 接 STM32 `PA10/RX`，USB-TTL 的 `RXD` 接 STM32 `PA9/TX`，`GND` 必须共地。
+- 使用 `3.3V TTL` 电平，不要把 5V TTL 信号直接接到 STM32 IO。
+- 理解串口参数：波特率、数据位、停止位、校验位。
+
+本工程默认参数：
+
+```text
+USART1
+TX: PA9
+RX: PA10
+波特率: 115200
+数据格式: 8N1，即 8 数据位、无校验、1 停止位
+```
+
+### 第 2 阶段：最小收发
+
+目标：
+
+- 单片机上电后主动发送启动信息。
+- 串口助手发送 `PING`，单片机回复 `PONG`。
+- 串口助手发送 `ECHO hello`，单片机回复 `hello`。
+
+重点理解：
+
+- `printf` 重定向到串口发送。
+- 接收中断负责收字节。
+- 主循环负责处理完整一行命令。
+
+### 第 3 阶段：命令解析
+
+目标：
+
+- 会用一行文本命令控制硬件。
+- 会判断正确命令和错误命令。
+
+可练习命令：
+
+```text
+HELP
+STATUS
+LED RED
+LED YELLOW
+LED GREEN
+LED OFF
+LED AUTO
+TH?
+TH +
+TH -
+TH 2000
+```
+
+### 第 4 阶段：和传感器联动
+
+目标：
+
+- 用 `STATUS` 查看光敏 AO、亮暗状态、阈值、温度、LED 模式。
+- 用 `TH +`、`TH -`、`TH 2000` 修改光敏阈值。
+- 用 `LED AUTO` 恢复光敏自动控制交通灯。
+
+重点理解：
+
+- 串口不仅能打印调试信息，也能作为人机交互入口。
+- 串口命令可以修改程序运行参数。
+
+### 第 5 阶段：扩展练习
+
+可以继续加这些命令：
+
+- `TEMP?`：只返回温度。
+- `LIGHT?`：只返回光敏 AO 和亮暗状态。
+- `BAUD?`：返回当前波特率。
+- `MODE DEBUG ON/OFF`：控制是否周期性打印状态。
+- `SAVE`：把阈值保存到 Flash。
+
+## 本工程串口练习程序
+
+新增文件：
+
+- `User/app_uart_practice.c`
+- `User/app_uart_practice.h`
+
+已修改文件：
+
+- `User/main.c`：初始化 `USART1`，并在主循环里处理串口命令。
+- `SYSTEM/usart/usart.c`：串口接收支持 `\r` 或 `\n` 作为一行结束，适配常见串口助手。
+- `SYSTEM/usart/usart.h`：接收缓存变量声明为 `volatile`，适合中断和主循环共同访问。
+- `Project/led.uvprojx`：新文件已加入 Keil 工程。
+
+串口助手建议设置：
+
+```text
+波特率: 115200
+数据位: 8
+校验位: None
+停止位: 1
+发送格式: ASCII / 文本
+换行: CRLF、CR 或 LF 均可
+```
+
+上电后串口助手应看到：
+
+```text
+STM32F103 UART practice ready.
+USART1: PA9=TX, PA10=RX, 115200 8N1.
+Send HELP for commands.
+```
+
+如果没有收到信息，按顺序检查：
+
+- USB-TTL 的 `TXD/RXD` 是否交叉连接。
+- `GND` 是否共地。
+- 串口助手是否选对 COM 口。
+- 波特率是否是 `115200`。
+- USB-TTL 是否为 `3.3V TTL` 电平。

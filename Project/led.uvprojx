@@ -654,6 +654,16 @@
               <FileType>5</FileType>
               <FilePath>..\User\app_ui.h</FilePath>
             </File>
+            <File>
+              <FileName>app_uart_practice.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app_uart_practice.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_uart_practice.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\User\app_uart_practice.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

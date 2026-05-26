@@ -9,6 +9,8 @@
 #include "app_temp.h"
 #include "joystick.h"
 #include "app_ui.h"
+#include "usart.h"
+#include "app_uart_practice.h"
 
 int main(void)
 {
@@ -16,6 +18,7 @@ int main(void)
 
     LED_Init();
     Timing_Init();
+    uart_init(115200);
 
     LightSensor_Init();
     LightSensor_ADC_Init();
@@ -29,6 +32,7 @@ int main(void)
     App_Light_Init();
     App_Temp_Init();
     App_UI_Init();
+    App_UARTPractice_Init();
 
     while (1)
     {
@@ -36,5 +40,6 @@ int main(void)
         App_Temp_Task();
         Joystick_Task();
         App_UI_Task();
+        App_UARTPractice_Task();
     }
 }
