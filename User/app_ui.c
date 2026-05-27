@@ -4,32 +4,118 @@
 #include "joystick.h"
 #include "app_light.h"
 #include "app_temp.h"
-#include "led.h"
 
-#define UI_STATUS_REFRESH_MS    500
 #define UI_CURSOR_BLINK_MS      500
 #define UI_THRESHOLD_STEP       50
 
-#define UI_SCREEN_MENU          0
-#define UI_SCREEN_STATUS        1
-#define UI_SCREEN_THRESHOLD     2
-#define UI_SCREEN_TRAFFIC       3
+typedef enum
+{
+    UI_SCREEN_MENU = 0,
+    UI_SCREEN_STATUS,
+    UI_SCREEN_THRESHOLD,
+    UI_SCREEN_TRAFFIC
+} UiScreen;
 
-#define UI_TRAFFIC_AUTO         0
-#define UI_TRAFFIC_RED          1
-#define UI_TRAFFIC_YELLOW       2
-#define UI_TRAFFIC_GREEN        3
-#define UI_TRAFFIC_OFF          4
+typedef enum
+{
+    UI_TRAFFIC_AUTO = 0,
+    UI_TRAFFIC_RED,
+    UI_TRAFFIC_YELLOW,
+    UI_TRAFFIC_GREEN,
+    UI_TRAFFIC_OFF
+} UiTrafficIndex;
 
-static uint8_t s_screen = UI_SCREEN_MENU;
+static UiScreen s_screen = UI_SCREEN_MENU;
 static uint8_t s_menu_index = 0;
-static uint8_t s_traffic_index = UI_TRAFFIC_AUTO;
+static UiTrafficIndex s_traffic_index = UI_TRAFFIC_AUTO;
 static uint8_t s_cursor_visible = 1;
 static uint8_t s_screen_dirty = 1;
 static uint8_t s_status_dirty = 1;
 static uint8_t s_cursor_dirty = 1;
-static uint32_t s_last_status_time = 0;
 static uint32_t s_last_cursor_time = 0;
+static uint16_t s_last_light_version = 0;
+static uint16_t s_last_temp_version = 0;
+
+static UiTrafficIndex UI_ModeToTrafficIndex(AppLightTrafficMode mode)
+{
+    if (mode == APP_LIGHT_TRAFFIC_RED)
+    {
+        return UI_TRAFFIC_RED;
+    }
+
+    if (mode == APP_LIGHT_TRAFFIC_YELLOW)
+    {
+        return UI_TRAFFIC_YELLOW;
+    }
+
+    if (mode == APP_LIGHT_TRAFFIC_GREEN)
+    {
+        return UI_TRAFFIC_GREEN;
+    }
+
+    if (mode == APP_LIGHT_TRAFFIC_OFF)
+    {
+        return UI_TRAFFIC_OFF;
+    }
+
+    return UI_TRAFFIC_AUTO;
+}
+
+static AppLightTrafficMode UI_TrafficIndexToMode(UiTrafficIndex index)
+{
+    if (index == UI_TRAFFIC_RED)
+    {
+        return APP_LIGHT_TRAFFIC_RED;
+    }
+
+    if (index == UI_TRAFFIC_YELLOW)
+    {
+        return APP_LIGHT_TRAFFIC_YELLOW;
+    }
+
+    if (index == UI_TRAFFIC_GREEN)
+    {
+        return APP_LIGHT_TRAFFIC_GREEN;
+    }
+
+    if (index == UI_TRAFFIC_OFF)
+    {
+        return APP_LIGHT_TRAFFIC_OFF;
+    }
+
+    return APP_LIGHT_TRAFFIC_AUTO;
+}
+
+static void UI_UpdateDataVersions(void)
+{
+    uint16_t light_version;
+    uint16_t temp_version;
+    UiTrafficIndex traffic_index;
+
+    light_version = App_Light_GetVersion();
+
+    if (light_version != s_last_light_version)
+    {
+        s_last_light_version = light_version;
+        s_status_dirty = 1;
+
+        traffic_index = UI_ModeToTrafficIndex(App_Light_GetTrafficMode());
+
+        if (traffic_index != s_traffic_index)
+        {
+            s_traffic_index = traffic_index;
+            s_cursor_dirty = 1;
+        }
+    }
+
+    temp_version = App_Temp_GetVersion();
+
+    if (temp_version != s_last_temp_version)
+    {
+        s_last_temp_version = temp_version;
+        s_status_dirty = 1;
+    }
+}
 
 static void UI_ClearLine(uint8_t page)
 {
@@ -235,42 +321,23 @@ static void UI_RenderTrafficScreen(void)
     OLED_ShowString(7, 0, "LEFT BACK");
 }
 
-static void UI_EnterScreen(uint8_t screen)
+static void UI_EnterScreen(UiScreen screen)
 {
     s_screen = screen;
     s_cursor_visible = 1;
     s_screen_dirty = 1;
     s_status_dirty = 1;
     s_cursor_dirty = 1;
+
+    if (screen == UI_SCREEN_TRAFFIC)
+    {
+        s_traffic_index = UI_ModeToTrafficIndex(App_Light_GetTrafficMode());
+    }
 }
 
 static void UI_ApplyTrafficSelection(void)
 {
-    if (s_traffic_index == UI_TRAFFIC_AUTO)
-    {
-        App_Light_SetAutoTraffic(1);
-    }
-    else
-    {
-        App_Light_SetAutoTraffic(0);
-
-        if (s_traffic_index == UI_TRAFFIC_RED)
-        {
-            Traffic_RedOn();
-        }
-        else if (s_traffic_index == UI_TRAFFIC_YELLOW)
-        {
-            Traffic_YellowOn();
-        }
-        else if (s_traffic_index == UI_TRAFFIC_GREEN)
-        {
-            Traffic_GreenOn();
-        }
-        else
-        {
-            Traffic_AllOff();
-        }
-    }
+    App_Light_SetTrafficMode(UI_TrafficIndexToMode(s_traffic_index));
 }
 
 static void UI_ProcessMenuEvents(uint8_t events)
@@ -389,8 +456,10 @@ static void UI_ProcessEvents(uint8_t events)
 
 void App_UI_Init(void)
 {
-    s_last_status_time = Timing_GetTick();
-    s_last_cursor_time = s_last_status_time;
+    s_last_cursor_time = Timing_GetTick();
+    s_last_light_version = App_Light_GetVersion();
+    s_last_temp_version = App_Temp_GetVersion();
+    s_traffic_index = UI_ModeToTrafficIndex(App_Light_GetTrafficMode());
     UI_EnterScreen(UI_SCREEN_MENU);
 }
 
@@ -402,12 +471,7 @@ void App_UI_Task(void)
     now = Timing_GetTick();
     events = Joystick_GetEvents();
     UI_ProcessEvents(events);
-
-    if (now - s_last_status_time >= UI_STATUS_REFRESH_MS)
-    {
-        s_last_status_time = now;
-        s_status_dirty = 1;
-    }
+    UI_UpdateDataVersions();
 
     if (now - s_last_cursor_time >= UI_CURSOR_BLINK_MS)
     {
