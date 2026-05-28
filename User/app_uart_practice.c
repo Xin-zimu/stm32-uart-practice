@@ -49,6 +49,7 @@ static int StrStartsWith(const char *text, const char *prefix)
     return 1;
 }
 
+/* 老 C 库环境下不用 strlen，保持对 Keil C 的兼容性。 */
 static uint16_t StrLen(const char *text)
 {
     uint16_t len;
@@ -149,6 +150,7 @@ static void PrintTemp10(int16_t temp10)
     printf("%d.%d", temp10 / 10, temp10 % 10);
 }
 
+/* 把内部交通灯模式转换为 STATUS 命令中的可读文本。 */
 static const char *TrafficModeName(AppLightTrafficMode mode)
 {
     if (mode == APP_LIGHT_TRAFFIC_RED)
@@ -219,8 +221,10 @@ static void PrintStatus(void)
     printf("\r\n");
 }
 
+/* 顶层命令处理函数签名：raw_arg 保留原始大小写，arg 是大写后的参数。 */
 typedef void (*UartCommandHandler)(const char *raw_arg, const char *arg);
 
+/* 顶层命令表项，allow_arg 用于拦截 HELP xxx 这类错误输入。 */
 typedef struct
 {
     const char *name;
@@ -228,6 +232,7 @@ typedef struct
     UartCommandHandler handler;
 } UartCommand;
 
+/* LED 子命令表项，将文本命令映射到 app_light 的交通灯模式。 */
 typedef struct
 {
     const char *name;
@@ -251,6 +256,7 @@ static void HandlePingCommand(const char *raw_arg, const char *arg)
 static void HandleEchoCommand(const char *raw_arg, const char *arg)
 {
     (void)arg;
+    /* ECHO 需要保留用户输入的原始大小写，所以使用 raw_arg。 */
     printf("%s\r\n", SkipSpaces(raw_arg));
 }
 
@@ -267,6 +273,10 @@ static void HandleStatusCommand(const char *raw_arg, const char *arg)
  */
 static void HandleLedCommand(const char *raw_arg, const char *arg)
 {
+    /*
+     * 子命令也使用表驱动，后续新增 BLINK 等模式时只需要扩展表项。
+     * 注意这里不直接调用 Traffic_*，避免串口层绕过 app_light 的状态模型。
+     */
     static const LedCommand led_commands[] =
     {
         {"AUTO", APP_LIGHT_TRAFFIC_AUTO},
@@ -344,6 +354,10 @@ static uint8_t CommandMatch(const char *cmd,
 
     len = StrLen(name);
 
+    /*
+     * 命令必须完整匹配一个单词。
+     * 例如 LEDX 不应被识别为 LED 命令。
+     */
     if (StrStartsWith(cmd, name) == 0)
     {
         return 0;
@@ -365,6 +379,7 @@ static uint8_t CommandMatch(const char *cmd,
 
     if ((StrEqual(name, "TH")) && (next == '?'))
     {
+        /* 兼容 TH? 这种无空格写法。 */
         *arg = cmd + len;
         return 1;
     }
@@ -374,6 +389,10 @@ static uint8_t CommandMatch(const char *cmd,
 
 static void DispatchCommand(const char *raw_line, const char *cmd)
 {
+    /*
+     * 顶层命令表。
+     * 这里使用普通结构体初始化，避免复杂 designated initializer 影响老编译器。
+     */
     static const UartCommand commands[] =
     {
         {"HELP", 0, HandleHelpCommand},
@@ -395,6 +414,7 @@ static void DispatchCommand(const char *raw_line, const char *cmd)
             raw_arg = raw_line + StrLen(commands[i].name);
             trimmed_arg = SkipSpaces(arg);
 
+            /* 不允许参数的命令，如果后面跟了内容，直接报错。 */
             if ((commands[i].allow_arg == 0) && (*trimmed_arg != '\0'))
             {
                 printf("ERR: %s takes no arguments\r\n", commands[i].name);
@@ -430,6 +450,10 @@ static void HandleLine(char *line)
     }
 
     cmd[USART_REC_LEN] = '\0';
+    /*
+     * cmd 用于命令匹配，统一转大写。
+     * line 保留原始输入，供 ECHO 等需要原始文本的命令使用。
+     */
     ToUpperString(cmd);           /* 转大写，不区分大小写 */
 
     printf("RX: %s\r\n", line);   /* 回显收到的原始内容 */
