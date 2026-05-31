@@ -1,0 +1,267 @@
+static uint8_t s_rx_len;
+static uint8_t s_rx_index;
+static uint8_t s_rx_payload[PROTO_MAX_DATA_LEN];
+static uint32_t s_last_rx_tick;
+
+#define PROTO_RX_TIMEOUT_MS  50u
+
+/* Command IDs. Request commands use 0x01..0x7F, response commands use 0x80..0xFE. */
+#define CMD_LED_SET      0x01
+#define CMD_LED_SET_RSP  0x81
+#define CMD_PING         0x02
+#define CMD_PING_RSP     0x82
+#define CMD_ERROR_RSP  0xFF
+
+/* Status codes returned in response frames. */
+#define PROTO_STATUS_OK             0x00
+#define PROTO_STATUS_LEN_ERROR      0x01
+#define PROTO_STATUS_LED_ID_ERROR   0x02
+#define PROTO_STATUS_ON_OFF_ERROR   0x03
+#define PROTO_STATUS_UNKNOWN_CMD    0x04
+
+void Protocol_Dispatch(const uint8_t *payload, uint8_t len);
+void Protocol_InputByteWithTime(uint8_t byte, uint32_t now_ms);
+void Protocol_CheckTimeout(uint32_t now_ms);
+uint8_t HandleLedSet(const uint8_t *data, uint8_t data_len);
+
+uint8_t Protocol_CalcChecksum(uint8_t len, const uint8_t *payload)
+{
+    uint16_t sum = 0;
+    sum += len;
+
+    /* CHECK = low 8 bits of LEN + all payload bytes. */
+    for(uint8_t i = 0; i < len; i++)
+    {
+        sum += payload[i];
+    }
+
+    return (uint8_t)(sum & 0xFF);
+}
+
+void Protocol_SendFrame(const uint8_t *payload, uint8_t len)
+{
+    /* Invalid parameters must not send a partial frame header. */
+    if(payload == NULL)
+    {
+        return;
+    }
+    else if(len == 0)
+    {
+        return;
+    }
+    else if(len > PROTO_MAX_DATA_LEN)
+    {
+        return;
+    }
+
+    /* Frame format: AA 55 LEN PAYLOAD CHECK. */
+    Uart_SendByte(0xAA);
+    Uart_SendByte(0x55);
+    Uart_SendByte(len);
+
+    for(uint8_t i = 0; i < len; i++)
+    {
+        Uart_SendByte(payload[i]);
+    }
+
+    Uart_SendByte(Protocol_CalcChecksum(len, payload));
+}
+
+static void Protocol_SendStatus(uint8_t rsp_cmd, uint8_t seq, uint8_t status)
+{
+    uint8_t rsp_payload[3];
+
+    /* Common response payload: RSP_CMD SEQ STATUS. */
+    rsp_payload[0] = rsp_cmd;
+    rsp_payload[1] = seq;
+    rsp_payload[2] = status;
+
+    Protocol_SendFrame(rsp_payload, 3);
+}
+
+typedef enum
+{
+    PROTO_STATE_WAIT_AA,
+    PROTO_STATE_WAIT_55,
+    PROTO_STATE_WAIT_LEN,
+    PROTO_STATE_RECV_PAYLOAD,
+    PROTO_STATE_WAIT_CHECK
+} ProtocolState_t;
+
+static ProtocolState_t s_rx_state = PROTO_STATE_WAIT_AA;
+
+static void Protocol_ResetRx(void)
+{
+    s_rx_len = 0;
+    s_rx_index = 0;
+    s_rx_state = PROTO_STATE_WAIT_AA;
+}
+
+void Protocol_CheckTimeout(uint32_t now_ms)
+{
+    if(s_rx_state == PROTO_STATE_WAIT_AA)
+    {
+        return;
+    }
+
+    if((uint32_t)(now_ms - s_last_rx_tick) > PROTO_RX_TIMEOUT_MS)
+    {
+        Protocol_ResetRx();
+    }
+}
+
+void Protocol_InputByte(uint8_t byte)
+{
+    Protocol_InputByteWithTime(byte, s_last_rx_tick);
+}
+
+void Protocol_InputByteWithTime(uint8_t byte, uint32_t now_ms)
+{
+    /* One call consumes exactly one UART byte. Static variables keep parser state. */
+    Protocol_CheckTimeout(now_ms);
+    s_last_rx_tick = now_ms;
+
+    switch(s_rx_state)
+    {
+        case PROTO_STATE_WAIT_AA:
+            if(byte == 0xAA)
+            {
+                s_rx_state = PROTO_STATE_WAIT_55;
+            }
+            break;
+
+        case PROTO_STATE_WAIT_55:
+            if(byte == 0x55)
+            {
+                s_rx_state = PROTO_STATE_WAIT_LEN;
+            }
+            else if(byte == 0xAA)
+            {
+                /* Treat this AA as the first header byte of a new frame. */
+                s_rx_state = PROTO_STATE_WAIT_55;
+            }
+            else
+            {
+                s_rx_state = PROTO_STATE_WAIT_AA;
+            }
+            break;
+
+        case PROTO_STATE_WAIT_LEN:
+            /* LEN must include at least CMD + SEQ and must fit the receive buffer. */
+            if(byte < 2 || byte > PROTO_MAX_DATA_LEN)
+            {
+                s_rx_state = PROTO_STATE_WAIT_AA;
+            }
+            else
+            {
+                s_rx_len = byte;
+                s_rx_index = 0;
+                s_rx_state = PROTO_STATE_RECV_PAYLOAD;
+            }
+            break;
+
+        case PROTO_STATE_RECV_PAYLOAD:
+            /* Payload may contain 0x00 or 0x0D; only LEN decides when it ends. */
+            s_rx_payload[s_rx_index++] = byte;
+            if(s_rx_index == s_rx_len)
+            {
+                s_rx_state = PROTO_STATE_WAIT_CHECK;
+            }
+            break;
+
+        case PROTO_STATE_WAIT_CHECK:
+        {
+            uint8_t check = Protocol_CalcChecksum(s_rx_len, s_rx_payload);
+
+            if(byte == check)
+            {
+                /* Only verified frames are dispatched. */
+                Protocol_Dispatch(s_rx_payload, s_rx_len);
+            }
+
+            /* After success or failure, wait for the next frame. */
+            s_rx_state = PROTO_STATE_WAIT_AA;
+            break;
+        }
+
+        default:
+            s_rx_state = PROTO_STATE_WAIT_AA;
+            break;
+    }
+}
+
+void Protocol_Dispatch(const uint8_t *payload, uint8_t len)
+{
+    if(payload == NULL || len < 2)
+    {
+        return;
+    }
+
+    uint8_t cmd = payload[0];
+    uint8_t seq = payload[1];
+
+    switch(cmd)
+    {
+        case CMD_LED_SET:
+        {
+            /* payload[0] is CMD, payload[1] is SEQ, command data starts at payload[2]. */
+            uint8_t status = HandleLedSet(&payload[2], len - 2);
+            Protocol_SendStatus(CMD_LED_SET_RSP, seq, status);
+            break;
+        }
+
+        case CMD_PING:
+        {
+            Protocol_SendStatus(CMD_PING_RSP, seq, PROTO_STATUS_OK);
+            break;
+        }
+        default:
+        {
+            uint8_t rsp_payload[4];
+
+            /* Unknown command response: ERROR_RSP SEQ STATUS ORIGINAL_CMD. */
+            rsp_payload[0] = CMD_ERROR_RSP;
+            rsp_payload[1] = seq;
+            rsp_payload[2] = PROTO_STATUS_UNKNOWN_CMD;
+            rsp_payload[3] = cmd;
+            Protocol_SendFrame(rsp_payload, 4);
+            break;
+        }
+    }
+}
+
+uint8_t HandleLedSet(const uint8_t *data, uint8_t data_len)
+{
+    /* LED_SET data format: LED_ID ON_OFF. */
+    if(data == NULL || data_len != 2)
+    {
+        return PROTO_STATUS_LEN_ERROR;
+    }
+
+    uint8_t led_id = data[0];
+    uint8_t on_off = data[1];
+
+    if(led_id != 1)
+    {
+        return PROTO_STATUS_LED_ID_ERROR;
+    }
+
+    if(on_off != 0 && on_off != 1)
+    {
+        return PROTO_STATUS_ON_OFF_ERROR;
+    }
+
+    Led_SetState(led_id, on_off == 1);
+    return PROTO_STATUS_OK;
+}
+
+#ifndef PROTOCOL_HOST_TEST
+void USART1_IRQHandler(void)
+{
+    if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+    {
+        uint8_t byte = (uint8_t)USART_ReceiveData(USART1);
+        Protocol_InputByte(byte);
+    }
+}
+#endif
