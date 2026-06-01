@@ -1,5 +1,6 @@
 #include "sys.h"
 #include "usart.h"	  
+#include "app_protocol_practice.h"
 ////////////////////////////////////////////////////////////////////////////////// 	 
 //如果使用ucos,则包括下面的头文件即可.
 #if SYSTEM_SUPPORT_OS
@@ -65,6 +66,7 @@ volatile u8 USART_RX_BUF[USART_REC_LEN];     //接收缓冲,最大USART_REC_LEN个字节.
 //bit13~0，	接收到的有效字节数目
 volatile u16 USART_RX_STA=0;       //接收状态标记	  
   
+/* Configure USART1 on PA9/PA10 and enable RX interrupt. */
 void uart_init(u32 bound){
   //GPIO端口设置
   GPIO_InitTypeDef GPIO_InitStructure;
@@ -106,6 +108,7 @@ void uart_init(u32 bound){
 
 }
 
+/* USART1 RX interrupt: binary protocol bytes are tried first, text lines second. */
 void USART1_IRQHandler(void)                	//串口1中断服务程序
 	{
 	u8 Res;
@@ -115,6 +118,9 @@ void USART1_IRQHandler(void)                	//串口1中断服务程序
 	if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)  //接收中断(接收到的数据必须是0x0d 0x0a结尾)
 		{
 		Res =USART_ReceiveData(USART1);	//读取接收到的数据
+        /* Protocol parser returns 1 when the byte belongs to a binary frame. */
+        if(App_ProtocolPractice_ReceiveByte(Res) == 0)
+            {
 		
 		if((USART_RX_STA&0x8000)==0)//receive not complete
 			{
@@ -132,6 +138,7 @@ void USART1_IRQHandler(void)                	//串口1中断服务程序
 				if(USART_RX_STA>(USART_REC_LEN-1))USART_RX_STA=0;
 				}		 
 			}   		 
+            }
      } 
 #if SYSTEM_SUPPORT_OS 	//如果SYSTEM_SUPPORT_OS为真，则需要支持OS.
 	OSIntExit();  											 

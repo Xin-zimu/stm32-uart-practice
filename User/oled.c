@@ -10,6 +10,12 @@
 #define OLED_SDA_PIN       GPIO_Pin_7
 #define OLED_I2C_ADDR      0x78
 
+/*
+ * Minimal SSD1306 OLED driver.
+ *
+ * The UI only needs ASCII text and numbers, so the font table is kept small
+ * and each character is drawn as 5 columns plus one blank spacing column.
+ */
 static void OLED_DelayMs(uint32_t ms)
 {
     uint32_t i;
@@ -61,6 +67,7 @@ static uint8_t OLED_I2C_WaitFlag(FlagStatus status, uint32_t flag)
     return 1;
 }
 
+/* Timeout wrappers keep a missing OLED from locking the main program forever. */
 static uint8_t OLED_I2C_BeginWrite(uint8_t control)
 {
     if (OLED_I2C_WaitFlag(SET, I2C_FLAG_BUSY) == 0)
@@ -113,6 +120,7 @@ static void OLED_I2C_EndWrite(void)
     I2C_GenerateSTOP(OLED_I2C, ENABLE);
 }
 
+/* Initialize PB6/PB7 as I2C1 pins and enable the hardware I2C peripheral. */
 static void OLED_HW_I2C_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -139,6 +147,7 @@ static void OLED_HW_I2C_Init(void)
     I2C_Cmd(OLED_I2C, ENABLE);
 }
 
+/* Send one SSD1306 command byte. */
 static void OLED_WriteCommand(uint8_t command)
 {
     if (OLED_I2C_BeginWrite(0x00))
@@ -159,6 +168,7 @@ static void OLED_WriteData(uint8_t data)
 
 static void OLED_SetPos(uint8_t page, uint8_t column)
 {
+    /* SSD1306 addresses the 128x64 screen as 8 pages of 8 vertical pixels. */
     OLED_WriteCommand(0xB0 + page);
     OLED_WriteCommand(0x00 + (column & 0x0F));
     OLED_WriteCommand(0x10 + ((column >> 4) & 0x0F));
@@ -228,6 +238,7 @@ void OLED_Init(void)
     OLED_HW_I2C_Init();
     OLED_DelayMs(100);
 
+    /* Standard SSD1306 128x64 initialization sequence. */
     OLED_WriteCommand(0xAE);
     OLED_WriteCommand(0x20);
     OLED_WriteCommand(0x10);
@@ -357,6 +368,7 @@ static const uint8_t *OLED_GetMiniFont(char ch)
     }
 }
 
+/* Draw one 5x7 ASCII character at a page/column position. */
 void OLED_ShowChar(uint8_t page, uint8_t column, char ch)
 {
     uint8_t i;
@@ -393,6 +405,7 @@ void OLED_ShowString(uint8_t page, uint8_t column, const char *str)
     }
 }
 
+/* Draw a fixed-width decimal number with leading zeroes when len is larger. */
 void OLED_ShowNum(uint8_t page, uint8_t column, uint16_t num, uint8_t len)
 {
     uint8_t i;

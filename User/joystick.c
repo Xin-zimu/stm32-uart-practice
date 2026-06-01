@@ -4,6 +4,12 @@
 #define JOY_SCAN_MS        10
 #define JOY_DEBOUNCE_MS    30
 
+/*
+ * Debounced joystick driver.
+ *
+ * s_stable_state stores currently pressed directions. s_events stores only new
+ * press edges, so the UI handles one action per physical press.
+ */
 static uint8_t s_last_sample = 0;
 static uint8_t s_stable_state = 0;
 static uint8_t s_events = 0;
@@ -42,6 +48,7 @@ static uint8_t Joystick_ReadRaw(void)
     return state;
 }
 
+/* All joystick pins use pull-up input, so a pressed key reads Bit_RESET. */
 static void Joystick_InitPin(GPIO_TypeDef *port, uint16_t pin)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -86,6 +93,7 @@ void Joystick_Task(void)
 
     if (raw != s_last_sample)
     {
+        /* Input changed; wait until it remains stable for debounce time. */
         s_last_sample = raw;
         s_change_time = now;
         return;
@@ -95,10 +103,12 @@ void Joystick_Task(void)
     {
         changed = raw ^ s_stable_state;
         s_stable_state = raw;
+        /* Only rising "pressed" edges become events. Releases are ignored. */
         s_events |= changed & raw;
     }
 }
 
+/* Read and clear accumulated press events for one main-loop cycle. */
 uint8_t Joystick_GetEvents(void)
 {
     uint8_t events;

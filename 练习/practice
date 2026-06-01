@@ -3,6 +3,12 @@ static uint8_t s_rx_index;
 static uint8_t s_rx_payload[PROTO_MAX_DATA_LEN];
 static uint32_t s_last_rx_tick;
 
+/*
+ * Standalone protocol exercise code.
+ *
+ * The frame is intentionally small for learning:
+ * AA 55 LEN PAYLOAD CHECK, where PAYLOAD starts with CMD and SEQ.
+ */
 #define PROTO_RX_TIMEOUT_MS  50u
 
 /* Command IDs. Request commands use 0x01..0x7F, response commands use 0x80..0xFE. */
@@ -38,6 +44,7 @@ uint8_t Protocol_CalcChecksum(uint8_t len, const uint8_t *payload)
     return (uint8_t)(sum & 0xFF);
 }
 
+/* Send a complete frame through the UART abstraction used by MCU and tests. */
 void Protocol_SendFrame(const uint8_t *payload, uint8_t len)
 {
     /* Invalid parameters must not send a partial frame header. */
@@ -90,6 +97,7 @@ typedef enum
 
 static ProtocolState_t s_rx_state = PROTO_STATE_WAIT_AA;
 
+/* Clear all partial receive data and wait for a fresh frame header. */
 static void Protocol_ResetRx(void)
 {
     s_rx_len = 0;
@@ -190,6 +198,7 @@ void Protocol_InputByteWithTime(uint8_t byte, uint32_t now_ms)
     }
 }
 
+/* Decode a verified payload and send a command-specific response. */
 void Protocol_Dispatch(const uint8_t *payload, uint8_t len)
 {
     if(payload == NULL || len < 2)
@@ -256,6 +265,7 @@ uint8_t HandleLedSet(const uint8_t *data, uint8_t data_len)
 }
 
 #ifndef PROTOCOL_HOST_TEST
+/* MCU build: feed received USART1 bytes into the protocol parser. */
 void USART1_IRQHandler(void)
 {
     if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)

@@ -321,13 +321,13 @@ CHECK：用于检测数据损坏
 SEQ：用于匹配请求和响应
 STATUS：用于反馈命令执行结果
 UNKNOWN_CMD：用于反馈未知命令
+MCU 接收超时：用于丢弃半包
+上位机超时重试：用于丢包后重新发送请求
 ```
 
 当前还没有实现：
 
 ```text
-重试
-上位机侧命令超时
 重复命令检测
 ```
 
@@ -350,6 +350,20 @@ PAYLOAD = RSP_CMD SEQ STATUS DATA...
 等待带相同 SEQ 的响应。
 如果超时没有响应，重试 N 次。
 如果仍然失败，报告通信失败。
+```
+
+当前练习测试中使用的上位机侧规则：
+
+```text
+HOST_TX_TIMEOUT_MS = 100 ms
+HOST_MAX_RETRIES = 2
+
+发送请求后进入 pending 状态。
+收到响应时检查响应帧里的 SEQ。
+SEQ 不匹配：忽略该响应，继续等待。
+SEQ 匹配：记录 STATUS，清除 pending。
+超过 HOST_TX_TIMEOUT_MS 没有匹配响应：重发同一帧。
+超过最大重试次数仍无匹配响应：标记失败。
 ```
 
 MCU 规则：

@@ -16,6 +16,7 @@
 #define DS18B20_DQ_HIGH()      GPIO_SetBits(DS18B20_GPIO_PORT, DS18B20_DQ_PIN)
 #define DS18B20_DQ_READ()      GPIO_ReadInputDataBit(DS18B20_GPIO_PORT, DS18B20_DQ_PIN)
 
+/* Drive the 1-Wire bus. Open-drain lets the pull-up release the line high. */
 static void DS18B20_IO_OUT(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -46,6 +47,7 @@ void DS18B20_Init(void)
     DS18B20_DQ_HIGH();
 }
 
+/* Reset the bus and check for the DS18B20 presence pulse. */
 uint8_t DS18B20_Check(void)
 {
     uint8_t retry = 0;
@@ -178,6 +180,7 @@ uint8_t DS18B20_StartConvert(void)
     return 1;
 }
 
+/* Read temperature and return it as Celsius * 10 to avoid float on MCU. */
 uint8_t DS18B20_ReadTemp10(int16_t *temp10)
 {
     uint8_t temp_l;

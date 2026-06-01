@@ -7,6 +7,7 @@
 #define TRAFFIC_YELLOW_PIN     GPIO_Pin_6
 #define TRAFFIC_GREEN_PIN      GPIO_Pin_7
 
+/* Configure PA5/PA6/PA7 as push-pull outputs for the three traffic LEDs. */
 void LED_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -22,6 +23,7 @@ void LED_Init(void)
     Traffic_AllOff();
 }
 
+/* Turn off every traffic LED before selecting a new single-light state. */
 void Traffic_AllOff(void)
 {
     GPIO_ResetBits(TRAFFIC_GPIO_PORT, TRAFFIC_RED_PIN);
@@ -31,6 +33,7 @@ void Traffic_AllOff(void)
 
 void Traffic_RedOn(void)
 {
+    /* Keep traffic light output mutually exclusive. */
     Traffic_AllOff();
     GPIO_SetBits(TRAFFIC_GPIO_PORT, TRAFFIC_RED_PIN);
 }

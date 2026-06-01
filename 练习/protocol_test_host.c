@@ -14,6 +14,11 @@ static uint8_t g_led_id;
 static bool g_led_state;
 static uint8_t g_led_set_count;
 
+/*
+ * Host-side doubles for the MCU hardware functions.
+ * The protocol exercise calls these names, and the tests inspect the captured
+ * buffers/states instead of requiring a real STM32 board.
+ */
 void Uart_SendByte(uint8_t byte)
 {
     if (g_uart_tx_count < sizeof(g_uart_tx))
@@ -32,12 +37,43 @@ void Led_SetState(uint8_t led_id, bool state)
 #define PROTOCOL_HOST_TEST
 #include "practice"
 
+#define HOST_TX_TIMEOUT_MS 100u
+#define HOST_MAX_RETRIES   2u
+
+typedef struct
+{
+    bool pending;
+    bool failed;
+    uint8_t seq;
+    uint8_t retry_count;
+    uint8_t send_count;
+    uint8_t status;
+    uint8_t payload[PROTO_MAX_DATA_LEN];
+    uint8_t payload_len;
+    uint32_t last_send_ms;
+} HostRequest_t;
+
+static HostRequest_t g_host;
+
+/* Clear captured UART output and fake LED state between independent tests. */
 static void ResetCapture(void)
 {
     g_uart_tx_count = 0;
     g_led_id = 0;
     g_led_state = false;
     g_led_set_count = 0;
+}
+
+static void Host_Reset(void)
+{
+    g_host.pending = false;
+    g_host.failed = false;
+    g_host.seq = 0;
+    g_host.retry_count = 0;
+    g_host.send_count = 0;
+    g_host.status = 0xFF;
+    g_host.payload_len = 0;
+    g_host.last_send_ms = 0;
 }
 
 static void ResetProtocol(void)
@@ -48,6 +84,7 @@ static void ResetProtocol(void)
     s_rx_state = PROTO_STATE_WAIT_AA;
 }
 
+/* Feed a whole frame into the parser one byte at a time. */
 static void FeedFrame(const uint8_t *frame, uint8_t len)
 {
     for (uint8_t i = 0; i < len; i++)
@@ -62,6 +99,115 @@ static void FeedFrameWithTime(const uint8_t *frame, uint8_t len, uint32_t start_
     {
         Protocol_InputByteWithTime(frame[i], start_ms + ((uint32_t)i * step_ms));
     }
+}
+
+static void Host_FeedPayloadToMcu(const uint8_t *payload, uint8_t len, uint32_t now_ms)
+{
+    uint8_t check = Protocol_CalcChecksum(len, payload);
+
+    Protocol_InputByteWithTime(0xAA, now_ms);
+    Protocol_InputByteWithTime(0x55, now_ms);
+    Protocol_InputByteWithTime(len, now_ms);
+
+    for(uint8_t i = 0; i < len; i++)
+    {
+        Protocol_InputByteWithTime(payload[i], now_ms);
+    }
+
+    Protocol_InputByteWithTime(check, now_ms);
+}
+
+static void Host_SendPending(uint32_t now_ms)
+{
+    Host_FeedPayloadToMcu(g_host.payload, g_host.payload_len, now_ms);
+    g_host.last_send_ms = now_ms;
+    g_host.send_count++;
+}
+
+/* Simulate a PC-side request with sequence matching and retry bookkeeping. */
+static void Host_StartLedSet(uint8_t seq, uint8_t led_id, uint8_t on_off, uint32_t now_ms)
+{
+    g_host.pending = true;
+    g_host.failed = false;
+    g_host.seq = seq;
+    g_host.retry_count = 0;
+    g_host.send_count = 0;
+    g_host.status = 0xFF;
+    g_host.payload[0] = CMD_LED_SET;
+    g_host.payload[1] = seq;
+    g_host.payload[2] = led_id;
+    g_host.payload[3] = on_off;
+    g_host.payload_len = 4;
+
+    Host_SendPending(now_ms);
+}
+
+static bool Host_ProcessCapturedResponse(void)
+{
+    uint8_t len;
+    uint8_t check;
+    uint8_t *payload;
+
+    if(g_uart_tx_count < 5)
+    {
+        return false;
+    }
+
+    if(g_uart_tx[0] != 0xAA || g_uart_tx[1] != 0x55)
+    {
+        return false;
+    }
+
+    len = g_uart_tx[2];
+    if(g_uart_tx_count != (uint8_t)(len + 4))
+    {
+        return false;
+    }
+
+    payload = &g_uart_tx[3];
+    check = g_uart_tx[3 + len];
+    if(check != Protocol_CalcChecksum(len, payload))
+    {
+        return false;
+    }
+
+    if(!g_host.pending || len < 3)
+    {
+        return false;
+    }
+
+    if(payload[1] != g_host.seq)
+    {
+        return false;
+    }
+
+    g_host.status = payload[2];
+    g_host.pending = false;
+    return true;
+}
+
+/* Retry a pending request after timeout, then mark failure after max retries. */
+static void Host_CheckTimeout(uint32_t now_ms)
+{
+    if(!g_host.pending)
+    {
+        return;
+    }
+
+    if((uint32_t)(now_ms - g_host.last_send_ms) <= HOST_TX_TIMEOUT_MS)
+    {
+        return;
+    }
+
+    if(g_host.retry_count >= HOST_MAX_RETRIES)
+    {
+        g_host.pending = false;
+        g_host.failed = true;
+        return;
+    }
+
+    g_host.retry_count++;
+    Host_SendPending(now_ms);
 }
 
 static int Expect(int condition, const char *message)
@@ -103,6 +249,7 @@ int main(void)
 {
     int failed = 0;
 
+    /* Valid LED_SET request: frame parsing, command dispatch, and response. */
     ResetProtocol();
     ResetCapture();
     {
@@ -118,6 +265,7 @@ int main(void)
         failed += Expect(s_rx_state == PROTO_STATE_WAIT_AA, "state returns to WAIT_AA after valid frame");
     }
 
+    /* Bad checksum must be dropped without side effects. */
     ResetProtocol();
     ResetCapture();
     {
@@ -184,6 +332,48 @@ int main(void)
         failed += Expect(g_led_set_count == 0, "len without SEQ is ignored");
         failed += Expect(g_uart_tx_count == 0, "len without SEQ sends no response");
         failed += Expect(s_rx_state == PROTO_STATE_WAIT_AA, "len without SEQ returns to WAIT_AA");
+    }
+
+    ResetProtocol();
+    ResetCapture();
+    Host_Reset();
+    {
+        const uint8_t wrong_seq_rsp[] = {CMD_LED_SET_RSP, 0x21, PROTO_STATUS_OK};
+        const uint8_t correct_seq_rsp[] = {CMD_LED_SET_RSP, 0x20, PROTO_STATUS_OK};
+
+        Host_StartLedSet(0x20, 1, 1, 100);
+        failed += Expect(g_host.pending == true, "host waits for response after sending request");
+        ResetCapture();
+
+        Protocol_SendFrame(wrong_seq_rsp, sizeof(wrong_seq_rsp));
+        failed += Expect(Host_ProcessCapturedResponse() == false, "host ignores response with wrong SEQ");
+        failed += Expect(g_host.pending == true, "host keeps waiting after wrong SEQ");
+
+        ResetCapture();
+        Protocol_SendFrame(correct_seq_rsp, sizeof(correct_seq_rsp));
+        failed += Expect(Host_ProcessCapturedResponse() == true, "host accepts response with matching SEQ");
+        failed += Expect(g_host.pending == false, "host clears pending request after matching SEQ");
+        failed += Expect(g_host.status == PROTO_STATUS_OK, "host records response status");
+    }
+
+    ResetProtocol();
+    ResetCapture();
+    Host_Reset();
+    {
+        Host_StartLedSet(0x30, 1, 1, 100);
+        failed += Expect(g_host.send_count == 1, "host sends first request once");
+
+        ResetCapture();
+        Host_CheckTimeout(150);
+        failed += Expect(g_host.send_count == 1, "host does not retry before timeout");
+
+        Host_CheckTimeout(201);
+        failed += Expect(g_host.retry_count == 1, "host increments retry count after timeout");
+        failed += Expect(g_host.send_count == 2, "host resends request after timeout");
+        failed += Expect(g_uart_tx_count > 0, "retry reaches MCU and captures response");
+        failed += Expect(Host_ProcessCapturedResponse() == true, "host matches retry response by SEQ");
+        failed += Expect(g_host.pending == false, "host stops waiting after retry response");
+        failed += Expect(g_host.failed == false, "host retry succeeds without failure");
     }
 
     ResetProtocol();

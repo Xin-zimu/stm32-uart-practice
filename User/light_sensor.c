@@ -23,6 +23,7 @@
 */
 #define LIGHT_DARK_LEVEL     Bit_SET
 
+/* Initialize the digital output pin. AO uses ADC and is initialized separately. */
 void LightSensor_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -40,6 +41,7 @@ uint8_t LightSensor_ReadDO(void)
     return GPIO_ReadInputDataBit(LIGHT_GPIO_PORT, LIGHT_DO_PIN);
 }
 
+/* Convert the module-specific DO level into a simple dark/not-dark result. */
 uint8_t LightSensor_IsDark(void)
 {
     if (LightSensor_ReadDO() == LIGHT_DARK_LEVEL)
@@ -85,6 +87,7 @@ void LightSensor_ADC_Init(void)
     while (ADC_GetCalibrationStatus(ADC1));
 }
 
+/* Single conversion on ADC1 channel 0, mapped to PA0. */
 uint16_t LightSensor_ReadAO(void)
 {
     ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_55Cycles5);

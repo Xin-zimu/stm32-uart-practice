@@ -25,6 +25,13 @@ Project/Listings/
 *.suo
 *.user
 
+# Python helper cache
+__pycache__/
+*.pyc
+
+# Local practice host test binaries
+练习/*.exe
+
 # OS files
 Thumbs.db
 Desktop.ini

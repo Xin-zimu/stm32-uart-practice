@@ -40,8 +40,13 @@
 #define JOY_EVENT_RIGHT    0x08
 #define JOY_EVENT_PRESS    0x10
 
+/* Initialize GPIO pins and the debounce state. */
 void Joystick_Init(void);
+
+/* Poll the joystick. Call this periodically from the main loop. */
 void Joystick_Task(void);
+
+/* Returns newly pressed directions since the last call, then clears them. */
 uint8_t Joystick_GetEvents(void);
 
 #endif

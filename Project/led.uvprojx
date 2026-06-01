@@ -664,6 +664,16 @@
               <FileType>5</FileType>
               <FilePath>..\User\app_uart_practice.h</FilePath>
             </File>
+            <File>
+              <FileName>app_protocol_practice.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\app_protocol_practice.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_protocol_practice.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\User\app_protocol_practice.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

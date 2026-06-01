@@ -8,6 +8,7 @@
 - `app_temp` 负责 DS18B20 非阻塞采样状态机。
 - `app_ui` 负责 OLED 菜单、页面切换和局部刷新。
 - `app_uart_practice` 负责串口命令解析。
+- `app_protocol_practice` 负责二进制协议设计练习，包含帧格式、状态机、校验、ACK 和序列号。
 - `led.c`、`oled.c`、`ds18b20.c`、`light_sensor.c` 等文件保持底层驱动职责。
 
 ## 当前功能
@@ -18,6 +19,7 @@
 - DS18B20 温度非阻塞读取。
 - 红黄绿交通灯支持自动、红、黄、绿、关闭模式。
 - USART1 命令行交互，支持状态查询、LED 模式控制和阈值调整。
+- USART1 二进制协议练习，支持 HEX 帧解析、ACK、错误码和状态响应。
 - UI 基于数据版本号刷新，避免固定周期无效刷屏。
 - 主循环采用非阻塞任务轮询。
 
@@ -166,6 +168,7 @@ User/
   app_temp.c/.h          DS18B20 温度采样状态机
   app_ui.c/.h            OLED 菜单和刷新逻辑
   app_uart_practice.c/.h USART1 命令行
+  app_protocol_practice.c/.h 二进制协议练习
   app_light_control.c/.h 旧接口兼容转发
   led.c/.h               交通灯 LED 底层驱动
   oled.c/.h              OLED 底层显示接口
@@ -206,6 +209,7 @@ Project/led.uvprojx
 - `User/app_temp.c`
 - `User/app_ui.c`
 - `User/app_uart_practice.c`
+- `User/app_protocol_practice.c`
 - `User/app_light_control.c`
 
 如果修改了引脚，优先检查这些文件：
@@ -253,3 +257,4 @@ LED AUTO
 - 增加 DS18B20 掉线提示和错误重试次数。
 - 增加周期性调试输出开关，例如 `DEBUG ON/OFF`。
 - 将串口命令扩展为多级命令表。
+- 按 `protocol_practice_protocol.md` 继续练习二进制协议：CRC16、重传、设备地址和更完整的响应帧。
