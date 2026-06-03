@@ -13,6 +13,10 @@
 #define LIGHT_GPIO_CLK       RCC_APB2Periph_GPIOA
 #define LIGHT_DO_PIN         GPIO_Pin_1
 #define LIGHT_AO_PIN         GPIO_Pin_0
+#define LIGHT_ADC_TIMEOUT    100000u
+
+static uint8_t s_adc_ready = 0;
+static uint16_t s_last_ao_value = 0;
 
 /*
    不同模块 DO 逻辑可能相反。
@@ -58,6 +62,7 @@ void LightSensor_ADC_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
     ADC_InitTypeDef ADC_InitStructure;
+    uint32_t timeout;
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1, ENABLE);
 
@@ -81,20 +86,61 @@ void LightSensor_ADC_Init(void)
     ADC_Cmd(ADC1, ENABLE);
 
     ADC_ResetCalibration(ADC1);
-    while (ADC_GetResetCalibrationStatus(ADC1));
+    timeout = LIGHT_ADC_TIMEOUT;
+    while (ADC_GetResetCalibrationStatus(ADC1))
+    {
+        if (timeout == 0)
+        {
+            s_adc_ready = 0;
+            return;
+        }
+
+        timeout--;
+    }
 
     ADC_StartCalibration(ADC1);
-    while (ADC_GetCalibrationStatus(ADC1));
+    timeout = LIGHT_ADC_TIMEOUT;
+    while (ADC_GetCalibrationStatus(ADC1))
+    {
+        if (timeout == 0)
+        {
+            s_adc_ready = 0;
+            return;
+        }
+
+        timeout--;
+    }
+
+    s_adc_ready = 1;
 }
 
 /* Single conversion on ADC1 channel 0, mapped to PA0. */
 uint16_t LightSensor_ReadAO(void)
 {
+    uint32_t timeout;
+
+    if (s_adc_ready == 0)
+    {
+        return s_last_ao_value;
+    }
+
     ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_55Cycles5);
 
+    ADC_ClearFlag(ADC1, ADC_FLAG_EOC);
     ADC_SoftwareStartConvCmd(ADC1, ENABLE);
 
-    while (ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC) == RESET);
+    timeout = LIGHT_ADC_TIMEOUT;
+    while (ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC) == RESET)
+    {
+        if (timeout == 0)
+        {
+            s_adc_ready = 0;
+            return s_last_ao_value;
+        }
 
-    return ADC_GetConversionValue(ADC1);
+        timeout--;
+    }
+
+    s_last_ao_value = ADC_GetConversionValue(ADC1);
+    return s_last_ao_value;
 }

@@ -4,7 +4,8 @@
 #include "led.h"
 
 #define LIGHT_HYSTERESIS      300
-#define LIGHT_CHECK_MS        50
+#define LIGHT_CHECK_MS        200
+#define LIGHT_AO_REPORT_DELTA 20
 #define STATE_STABLE_MS       300
 
 /*
@@ -21,6 +22,7 @@ typedef enum
 static uint32_t s_last_light_time = 0;
 static uint32_t s_pending_start_time = 0;
 static uint16_t s_light_value = 0;
+static uint16_t s_light_filtered_value = 0;
 static uint16_t s_light_threshold = 2000;
 static AppLightState s_light_state = APP_LIGHT_STATE_UNKNOWN;
 static AppLightState s_candidate_state = APP_LIGHT_STATE_UNKNOWN;
@@ -75,9 +77,10 @@ static void App_Light_ApplyTraffic(void)
 void App_Light_Init(void)
 {
     s_light_value = LightSensor_ReadAO();
+    s_light_filtered_value = s_light_value;
 
     /* 上电时先用当前 AO 和阈值确定初始亮暗状态。 */
-    if (s_light_value < s_light_threshold)
+    if (s_light_filtered_value < s_light_threshold)
     {
         s_light_state = APP_LIGHT_STATE_BRIGHT;
     }
@@ -102,7 +105,8 @@ void App_Light_Init(void)
 void App_Light_Task(void)
 {
     uint32_t now;
-    uint16_t light_value;
+    uint16_t raw_value;
+    uint16_t filtered_value;
 
     now = Timing_GetTick();
 
@@ -112,12 +116,18 @@ void App_Light_Task(void)
     }
 
     s_last_light_time = now;
-    light_value = LightSensor_ReadAO();
+    raw_value = LightSensor_ReadAO();
+    filtered_value = (uint16_t)(((uint32_t)s_light_filtered_value * 3u +
+                                 (uint32_t)raw_value + 2u) / 4u);
+    s_light_filtered_value = filtered_value;
 
-    /* AO 原始值变化也会影响 UI 显示，因此需要递增版本号。 */
-    if (light_value != s_light_value)
+    /* AO changes fast; only report meaningful movement to avoid busy OLED refresh. */
+    if (((filtered_value > s_light_value) &&
+         ((uint16_t)(filtered_value - s_light_value) >= LIGHT_AO_REPORT_DELTA)) ||
+        ((s_light_value > filtered_value) &&
+         ((uint16_t)(s_light_value - filtered_value) >= LIGHT_AO_REPORT_DELTA)))
     {
-        s_light_value = light_value;
+        s_light_value = filtered_value;
         App_Light_BumpVersion();
     }
 
@@ -126,14 +136,14 @@ void App_Light_Task(void)
     /* 亮转暗和暗转亮使用不同阈值边界，形成滞回。 */
     if (s_light_state == APP_LIGHT_STATE_BRIGHT)
     {
-        if (s_light_value > (s_light_threshold + LIGHT_HYSTERESIS))
+        if (s_light_filtered_value > (s_light_threshold + LIGHT_HYSTERESIS))
         {
             s_candidate_state = APP_LIGHT_STATE_DARK;
         }
     }
     else if (s_light_state == APP_LIGHT_STATE_DARK)
     {
-        if (s_light_value < (s_light_threshold - LIGHT_HYSTERESIS))
+        if (s_light_filtered_value < (s_light_threshold - LIGHT_HYSTERESIS))
         {
             s_candidate_state = APP_LIGHT_STATE_BRIGHT;
         }

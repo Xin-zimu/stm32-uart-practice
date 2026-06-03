@@ -15,6 +15,7 @@
 #define PROTO_HEAD_2             0x55
 #define PROTO_MAX_DATA_LEN       16
 #define PROTO_RX_TIMEOUT_MS      50u
+#define PROTO_TX_TIMEOUT         100000u
 
 /*
  * Final practice frame:
@@ -167,9 +168,19 @@ static void Protocol_PushFrameFromIrq(void)
 
 static void Protocol_SendByte(uint8_t byte)
 {
+    uint32_t timeout;
+
     USART_SendData(USART1, byte);
+
+    timeout = PROTO_TX_TIMEOUT;
     while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET)
     {
+        if (timeout == 0)
+        {
+            return;
+        }
+
+        timeout--;
     }
 }
 

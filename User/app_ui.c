@@ -6,6 +6,7 @@
 #include "app_temp.h"
 
 #define UI_CURSOR_BLINK_MS      500
+#define UI_DATA_REFRESH_MS      250
 #define UI_THRESHOLD_STEP       50
 
 /* OLED 页面枚举。每个页面只负责自己的显示和按键逻辑。 */
@@ -35,6 +36,7 @@ static uint8_t s_screen_dirty = 1;
 static uint8_t s_status_dirty = 1;
 static uint8_t s_cursor_dirty = 1;
 static uint32_t s_last_cursor_time = 0;
+static uint32_t s_last_data_time = 0;
 static uint16_t s_last_light_version = 0;
 static uint16_t s_last_temp_version = 0;
 
@@ -478,6 +480,7 @@ static void UI_ProcessEvents(uint8_t events)
 void App_UI_Init(void)
 {
     s_last_cursor_time = Timing_GetTick();
+    s_last_data_time = s_last_cursor_time;
     s_last_light_version = App_Light_GetVersion();
     s_last_temp_version = App_Temp_GetVersion();
     s_traffic_index = UI_ModeToTrafficIndex(App_Light_GetTrafficMode());
@@ -498,7 +501,12 @@ void App_UI_Task(void)
     now = Timing_GetTick();
     events = Joystick_GetEvents();
     UI_ProcessEvents(events);
-    UI_UpdateDataVersions();
+
+    if ((now - s_last_data_time >= UI_DATA_REFRESH_MS) || s_screen_dirty)
+    {
+        s_last_data_time = now;
+        UI_UpdateDataVersions();
+    }
 
     if (now - s_last_cursor_time >= UI_CURSOR_BLINK_MS)
     {

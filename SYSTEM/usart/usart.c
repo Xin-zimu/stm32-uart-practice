@@ -1,6 +1,8 @@
 #include "sys.h"
 #include "usart.h"	  
 #include "app_protocol_practice.h"
+
+#define USART_TX_TIMEOUT 100000u
 ////////////////////////////////////////////////////////////////////////////////// 	 
 //如果使用ucos,则包括下面的头文件即可.
 #if SYSTEM_SUPPORT_OS
@@ -31,14 +33,28 @@ void _sys_exit(int x)
 } 
 //重定义fputc函数 
 int fputc(int ch, FILE *f)
-{      
-	while((USART1->SR&0X40)==0);//循环发送,直到发送完毕   
-    USART1->DR = (u8) ch;      
-	return ch;
+{
+    u32 timeout;
+
+    (void)f;
+
+    timeout = USART_TX_TIMEOUT;
+    while ((USART1->SR & 0X40) == 0)
+    {
+        if (timeout == 0)
+        {
+            return ch;
+        }
+
+        timeout--;
+    }
+
+    USART1->DR = (u8)ch;
+    return ch;
 }
 #endif 
 
-/*使用microLib的方法*/
+/* MicroLIB fallback example. */
  /* 
 int fputc(int ch, FILE *f)
 {
