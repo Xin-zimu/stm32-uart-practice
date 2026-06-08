@@ -49,7 +49,8 @@ LED 关：    AA 55 01 02 00 03
 接收 LEN
 接收 CMD
 接收 DATA
-接收 CHECKSUM
+接收 CRC_LO
+接收 CRC_HI
 ```
 
 代码入口：
@@ -60,25 +61,24 @@ void App_ProtocolPractice_ReceiveByte(uint8_t byte);
 
 USART1 中断每收到 1 个字节，就调用一次这个函数。
 
-## 第 3 次练习：加入 checksum 或 CRC16
+## 第 3 次练习：从 checksum 升级为 CRC16
 
-当前代码实际使用 8 位累加和：
+当前代码实际使用 CRC-16/Modbus：
 
 ```text
-CHECKSUM = SEQ + LEN + CMD + DATA
+CRC 输入 = SEQ + LEN + CMD + DATA
+初值 = 0xFFFF
+多项式 = 0xA001（反射形式）
+帧尾 = CRC_LO CRC_HI
 ```
 
 代码位置：
 
 ```c
-static uint8_t Protocol_CalcChecksum(const ProtocolFrame *frame);
+static uint16_t Protocol_CalcFrameCrc16(const ProtocolFrame *frame);
 ```
 
-代码里也保留了 CRC16 计算函数，后续可以把帧尾从 1 字节 checksum 升级成 2 字节 CRC16：
-
-```c
-static uint16_t Protocol_CalcCrc16(const uint8_t *data, uint8_t len);
-```
+CRC16 比简单累加和更容易发现多位翻转、字节顺序变化等传输错误。
 
 ## 第 4 次练习：命令分发
 
@@ -122,7 +122,7 @@ static void Protocol_HandleFrame(const ProtocolFrame *frame);
 最终练习帧格式比第 1 次多了 `SEQ`：
 
 ```text
-AA 55 SEQ LEN CMD DATA CHECKSUM
+AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
 ```
 
 `SEQ` 是序列号。主机发送命令时自己递增，STM32 回复时带回同一个 `SEQ`。
@@ -139,7 +139,7 @@ STM32 不生成新的 SEQ，只把请求里的 SEQ 原样带回响应。
 ACK 帧：
 
 ```text
-AA 55 SEQ 02 80 ORIGIN_CMD ERR CHECKSUM
+AA 55 SEQ 02 80 ORIGIN_CMD ERR CRC_LO CRC_HI
 ```
 
 错误码：
@@ -159,7 +159,7 @@ AA 55 SEQ 02 80 ORIGIN_CMD ERR CHECKSUM
 ### 帧格式
 
 ```text
-AA 55 SEQ LEN CMD DATA CHECKSUM
+AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
 ```
 
 ### 字段说明
@@ -167,10 +167,10 @@ AA 55 SEQ LEN CMD DATA CHECKSUM
 ```text
 AA 55      固定帧头
 SEQ        序列号，0x00~0xFF
-LEN        DATA 长度，不包含帧头、SEQ、LEN、CMD、CHECKSUM
+LEN        DATA 长度，不包含帧头、SEQ、LEN、CMD、CRC
 CMD        命令
 DATA       参数
-CHECKSUM   SEQ + LEN + CMD + DATA，只保留低 8 位
+CRC_LO/HI  SEQ + LEN + CMD + DATA 的 CRC-16/Modbus，低字节在前
 ```
 
 ### 可发送命令
@@ -178,55 +178,55 @@ CHECKSUM   SEQ + LEN + CMD + DATA，只保留低 8 位
 PING：
 
 ```text
-AA 55 01 00 01 02
+AA 55 01 00 01 E1 C0
 ```
 
 LED 关：
 
 ```text
-AA 55 02 01 02 00 05
+AA 55 02 01 02 00 51 3C
 ```
 
 LED 红灯：
 
 ```text
-AA 55 03 01 02 01 07
+AA 55 03 01 02 01 91 00
 ```
 
 LED 黄灯：
 
 ```text
-AA 55 04 01 02 02 09
+AA 55 04 01 02 02 D0 75
 ```
 
 LED 绿灯：
 
 ```text
-AA 55 05 01 02 03 0B
+AA 55 05 01 02 03 10 49
 ```
 
 LED 自动：
 
 ```text
-AA 55 06 01 02 04 0D
+AA 55 06 01 02 04 51 CF
 ```
 
 读取状态：
 
 ```text
-AA 55 07 00 03 0A
+AA 55 07 00 03 80 00
 ```
 
 蜂鸣器关：
 
 ```text
-AA 55 08 01 04 00 0D
+AA 55 08 01 04 00 51 44
 ```
 
 蜂鸣器开：
 
 ```text
-AA 55 09 01 04 01 0F
+AA 55 09 01 04 01 91 78
 ```
 
 ### 响应示例
@@ -234,25 +234,25 @@ AA 55 09 01 04 01 0F
 PING 成功 ACK：
 
 ```text
-AA 55 01 02 80 01 00 84
+AA 55 01 02 80 01 00 18 00
 ```
 
 LED 红灯成功 ACK：
 
 ```text
-AA 55 03 02 80 02 00 87
+AA 55 03 02 80 02 00 61 30
 ```
 
 未知命令 ACK：
 
 ```text
-AA 55 SEQ 02 80 ORIGIN_CMD 03 CHECKSUM
+AA 55 SEQ 02 80 ORIGIN_CMD 03 CRC_LO CRC_HI
 ```
 
 读取状态会先回复 ACK，再回复状态帧：
 
 ```text
-AA 55 SEQ 05 83 TRAFFIC_MODE IS_DARK AO_H AO_L BUZZER CHECKSUM
+AA 55 SEQ 05 83 TRAFFIC_MODE IS_DARK AO_H AO_L BUZZER CRC_LO CRC_HI
 ```
 
 ## 第 8 次练习：可靠通信规则
@@ -290,7 +290,7 @@ PROTO_RX_TIMEOUT_MS = 50 ms
 作用：
 
 ```text
-防止丢字节后状态机长期卡在 WAIT_LEN、WAIT_DATA 或 WAIT_CHECKSUM。
+防止丢字节后状态机长期卡在 WAIT_LEN、WAIT_DATA、WAIT_CRC_LO 或 WAIT_CRC_HI。
 ```
 
 相关统计：
@@ -304,7 +304,7 @@ uint16_t App_ProtocolPractice_GetRxTimeoutCount(void);
 当前帧格式：
 
 ```text
-AA 55 SEQ LEN CMD DATA CHECKSUM
+AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
 ```
 
 SEQ 含义：
@@ -319,7 +319,7 @@ STM32 响应时必须带回相同 SEQ。
 
 ```text
 上位机发送：
-AA 55 03 01 02 01 07
+AA 55 03 01 02 01 91 00
 
 含义：
 SEQ = 03
@@ -328,7 +328,7 @@ CMD = 02
 DATA = 01
 
 STM32 回复：
-AA 55 03 02 80 02 00 87
+AA 55 03 02 80 02 00 61 30
 
 含义：
 SEQ = 03
@@ -396,4 +396,3 @@ pip install pyserial
 串口通信可能出现延迟、重发、旧响应晚到。
 如果不检查 SEQ，上位机可能把旧响应误认为当前命令的响应。
 ```
-

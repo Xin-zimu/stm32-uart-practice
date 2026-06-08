@@ -80,6 +80,7 @@ static void ResetProtocol(void)
 {
     s_rx_len = 0;
     s_rx_index = 0;
+    s_rx_crc_low = 0;
     s_last_rx_tick = 0;
     s_rx_state = PROTO_STATE_WAIT_AA;
 }
@@ -103,7 +104,7 @@ static void FeedFrameWithTime(const uint8_t *frame, uint8_t len, uint32_t start_
 
 static void Host_FeedPayloadToMcu(const uint8_t *payload, uint8_t len, uint32_t now_ms)
 {
-    uint8_t check = Protocol_CalcChecksum(len, payload);
+    uint16_t crc = Protocol_CalcCrc16(len, payload);
 
     Protocol_InputByteWithTime(0xAA, now_ms);
     Protocol_InputByteWithTime(0x55, now_ms);
@@ -114,7 +115,8 @@ static void Host_FeedPayloadToMcu(const uint8_t *payload, uint8_t len, uint32_t 
         Protocol_InputByteWithTime(payload[i], now_ms);
     }
 
-    Protocol_InputByteWithTime(check, now_ms);
+    Protocol_InputByteWithTime((uint8_t)(crc & 0xFF), now_ms);
+    Protocol_InputByteWithTime((uint8_t)(crc >> 8), now_ms);
 }
 
 static void Host_SendPending(uint32_t now_ms)
@@ -145,10 +147,10 @@ static void Host_StartLedSet(uint8_t seq, uint8_t led_id, uint8_t on_off, uint32
 static bool Host_ProcessCapturedResponse(void)
 {
     uint8_t len;
-    uint8_t check;
+    uint16_t received_crc;
     uint8_t *payload;
 
-    if(g_uart_tx_count < 5)
+    if(g_uart_tx_count < 6)
     {
         return false;
     }
@@ -159,14 +161,15 @@ static bool Host_ProcessCapturedResponse(void)
     }
 
     len = g_uart_tx[2];
-    if(g_uart_tx_count != (uint8_t)(len + 4))
+    if(g_uart_tx_count != (uint8_t)(len + 5))
     {
         return false;
     }
 
     payload = &g_uart_tx[3];
-    check = g_uart_tx[3 + len];
-    if(check != Protocol_CalcChecksum(len, payload))
+    received_crc = (uint16_t)g_uart_tx[3 + len] |
+                   ((uint16_t)g_uart_tx[4 + len] << 8);
+    if(received_crc != Protocol_CalcCrc16(len, payload))
     {
         return false;
     }
@@ -253,10 +256,10 @@ int main(void)
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x17};
+        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x15, 0xA9};
         FeedFrame(frame, sizeof(frame));
         {
-            const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x10, 0x00, 0x94};
+            const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x10, 0x00, 0x5D, 0x88};
             failed += ExpectTxFrame(expected_rsp, sizeof(expected_rsp), "valid frame sends OK response");
         }
         failed += Expect(g_led_set_count == 1, "valid frame calls Led_SetState once");
@@ -265,21 +268,21 @@ int main(void)
         failed += Expect(s_rx_state == PROTO_STATE_WAIT_AA, "state returns to WAIT_AA after valid frame");
     }
 
-    /* Bad checksum must be dropped without side effects. */
+    /* Bad CRC16 must be dropped without side effects. */
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x18};
+        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x14, 0xA9};
         FeedFrame(frame, sizeof(frame));
-        failed += Expect(g_led_set_count == 0, "bad checksum frame is ignored");
-        failed += Expect(g_uart_tx_count == 0, "bad checksum frame sends no response");
-        failed += Expect(s_rx_state == PROTO_STATE_WAIT_AA, "state returns to WAIT_AA after bad checksum");
+        failed += Expect(g_led_set_count == 0, "bad CRC16 frame is ignored");
+        failed += Expect(g_uart_tx_count == 0, "bad CRC16 frame sends no response");
+        failed += Expect(s_rx_state == PROTO_STATE_WAIT_AA, "state returns to WAIT_AA after bad CRC16");
     }
 
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x17};
+        const uint8_t frame[] = {0xAA, 0xAA, 0x55, 0x04, 0x01, 0x10, 0x01, 0x01, 0x15, 0xA9};
         FeedFrame(frame, sizeof(frame));
         failed += Expect(g_led_set_count == 1, "AA AA 55 sequence resynchronizes");
     }
@@ -287,8 +290,8 @@ int main(void)
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x11, 0x02, 0x01, 0x19};
-        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x11, 0x02, 0x97};
+        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x11, 0x02, 0x01, 0x44, 0x99};
+        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x11, 0x02, 0xDD, 0xD9};
         FeedFrame(frame, sizeof(frame));
         failed += Expect(g_led_set_count == 0, "bad LED id does not set LED");
         failed += ExpectTxFrame(expected_rsp, sizeof(expected_rsp), "bad LED id sends LED_ID_ERROR response");
@@ -297,8 +300,8 @@ int main(void)
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x12, 0x01, 0x02, 0x1A};
-        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x12, 0x03, 0x99};
+        const uint8_t frame[] = {0xAA, 0x55, 0x04, 0x01, 0x12, 0x01, 0x02, 0xF4, 0x68};
+        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x81, 0x12, 0x03, 0x1C, 0xE9};
         FeedFrame(frame, sizeof(frame));
         failed += Expect(g_led_set_count == 0, "bad ON_OFF does not set LED");
         failed += ExpectTxFrame(expected_rsp, sizeof(expected_rsp), "bad ON_OFF sends ON_OFF_ERROR response");
@@ -307,8 +310,8 @@ int main(void)
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x02, 0x02, 0x13, 0x17};
-        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x82, 0x13, 0x00, 0x98};
+        const uint8_t frame[] = {0xAA, 0x55, 0x02, 0x02, 0x13, 0x90, 0xAD};
+        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x03, 0x82, 0x13, 0x00, 0xAD, 0x78};
         FeedFrame(frame, sizeof(frame));
         failed += Expect(g_led_set_count == 0, "ping does not touch LED");
         failed += ExpectTxFrame(expected_rsp, sizeof(expected_rsp), "ping sends OK response");
@@ -317,8 +320,8 @@ int main(void)
     ResetProtocol();
     ResetCapture();
     {
-        const uint8_t frame[] = {0xAA, 0x55, 0x02, 0x09, 0x14, 0x1F};
-        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x04, 0xFF, 0x14, 0x04, 0x09, 0x24};
+        const uint8_t frame[] = {0xAA, 0x55, 0x02, 0x09, 0x14, 0xD6, 0x5F};
+        const uint8_t expected_rsp[] = {0xAA, 0x55, 0x04, 0xFF, 0x14, 0x04, 0x09, 0x67, 0x16};
         FeedFrame(frame, sizeof(frame));
         failed += Expect(g_led_set_count == 0, "unknown command does not touch LED");
         failed += ExpectTxFrame(expected_rsp, sizeof(expected_rsp), "unknown command sends error response");
@@ -401,10 +404,11 @@ int main(void)
     {
         const uint8_t payload[] = {0x01, 0x01, 0x00};
         Protocol_SendFrame(payload, sizeof(payload));
-        failed += Expect(g_uart_tx_count == 7, "send frame length is correct");
+        failed += Expect(g_uart_tx_count == 8, "send frame length is correct");
         failed += Expect(g_uart_tx[0] == 0xAA && g_uart_tx[1] == 0x55, "send frame header is AA 55");
         failed += Expect(g_uart_tx[2] == 0x03, "send frame LEN is correct");
-        failed += Expect(g_uart_tx[6] == 0x05, "send frame checksum is correct");
+        failed += Expect(g_uart_tx[6] == 0x50 && g_uart_tx[7] == 0x30,
+                         "send frame CRC16 is correct and low byte is first");
     }
 
     if (failed == 0)

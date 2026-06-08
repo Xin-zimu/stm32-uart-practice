@@ -37,8 +37,8 @@ static uint32_t s_last_rx_tick;
 为什么需要它：
 
 ```text
-状态机可能已经收到 AA 55 LEN，但后面的 PAYLOAD 或 CHECK 丢了。
-如果没有超时机制，状态机会一直停在 RECV_PAYLOAD 或 WAIT_CHECK。
+状态机可能已经收到 AA 55 LEN，但后面的 PAYLOAD 或 CRC16 丢了。
+如果没有超时机制，状态机会一直停在 RECV_PAYLOAD、WAIT_CRC_LO 或 WAIT_CRC_HI。
 s_last_rx_tick 用来判断“距离上一次收到字节已经过去多久”。
 ```
 
@@ -563,7 +563,7 @@ static bool Host_ProcessCapturedResponse(void)
 1. 检查响应帧长度是否足够。
 2. 检查帧头是否是 AA 55。
 3. 根据 LEN 判断整帧长度是否正确。
-4. 重新计算 CHECK。
+4. 重新计算 CRC16。
 5. 判断当前是否有 pending 请求。
 6. 检查响应 payload[1] 是否等于当前等待的 SEQ。
 7. 如果 SEQ 匹配，记录 STATUS 并清除 pending。
@@ -696,4 +696,3 @@ SEQ 序号：已完成
 它不是正式上位机软件，但协议规则已经验证通过。
 后续如果写真正上位机程序，可以直接照这个逻辑迁移。
 ```
-

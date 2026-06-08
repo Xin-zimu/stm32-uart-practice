@@ -19,9 +19,9 @@
 
 /*
  * Final practice frame:
- * AA 55 SEQ LEN CMD DATA CHECKSUM
+ * AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
  *
- * CHECKSUM = SEQ + LEN + CMD + DATA, keep the low 8 bits.
+ * CRC16/Modbus covers SEQ + LEN + CMD + DATA.
  */
 #define PROTO_CMD_PING           0x01
 #define PROTO_CMD_LED            0x02
@@ -45,7 +45,8 @@ typedef enum
     PROTO_RX_WAIT_LEN,
     PROTO_RX_WAIT_CMD,
     PROTO_RX_WAIT_DATA,
-    PROTO_RX_WAIT_CHECKSUM
+    PROTO_RX_WAIT_CRC_LO,
+    PROTO_RX_WAIT_CRC_HI
 } ProtocolRxState;
 
 typedef struct
@@ -61,6 +62,7 @@ static ProtocolFrame s_rx_frame;
 static volatile ProtocolFrame s_pending_frame;
 static volatile uint8_t s_pending_ready = 0;
 static uint8_t s_data_count = 0;
+static uint8_t s_rx_crc_low = 0;
 
 static volatile uint16_t s_rx_ok_count = 0;
 static volatile uint16_t s_rx_error_count = 0;
@@ -68,47 +70,39 @@ static volatile uint16_t s_rx_timeout_count = 0;
 static uint32_t s_last_rx_tick = 0;
 static uint8_t s_buzzer_state = 0;
 
-static uint8_t Protocol_CalcChecksum(const ProtocolFrame *frame)
+static uint16_t Protocol_UpdateCrc16(uint16_t crc, uint8_t byte)
 {
-    uint8_t checksum;
-    uint8_t i;
+    uint8_t bit;
 
-    checksum = 0;
-    checksum = (uint8_t)(checksum + frame->seq);
-    checksum = (uint8_t)(checksum + frame->len);
-    checksum = (uint8_t)(checksum + frame->cmd);
-
-    for (i = 0; i < frame->len; i++)
+    crc ^= byte;
+    for (bit = 0; bit < 8; bit++)
     {
-        checksum = (uint8_t)(checksum + frame->data[i]);
+        if ((crc & 0x0001) != 0)
+        {
+            crc = (uint16_t)((crc >> 1) ^ 0xA001);
+        }
+        else
+        {
+            crc = (uint16_t)(crc >> 1);
+        }
     }
 
-    return checksum;
+    return crc;
 }
 
-static uint16_t Protocol_CalcCrc16(const uint8_t *data, uint8_t len)
+static uint16_t Protocol_CalcFrameCrc16(const ProtocolFrame *frame)
 {
     uint16_t crc;
     uint8_t i;
-    uint8_t bit;
 
     crc = 0xFFFF;
+    crc = Protocol_UpdateCrc16(crc, frame->seq);
+    crc = Protocol_UpdateCrc16(crc, frame->len);
+    crc = Protocol_UpdateCrc16(crc, frame->cmd);
 
-    for (i = 0; i < len; i++)
+    for (i = 0; i < frame->len; i++)
     {
-        crc ^= data[i];
-
-        for (bit = 0; bit < 8; bit++)
-        {
-            if ((crc & 0x0001) != 0)
-            {
-                crc = (uint16_t)((crc >> 1) ^ 0xA001);
-            }
-            else
-            {
-                crc = (uint16_t)(crc >> 1);
-            }
-        }
+        crc = Protocol_UpdateCrc16(crc, frame->data[i]);
     }
 
     return crc;
@@ -121,6 +115,7 @@ static void Protocol_ResetRx(void)
     s_rx_frame.len = 0;
     s_rx_frame.cmd = 0;
     s_data_count = 0;
+    s_rx_crc_low = 0;
 }
 
 /* Abort a half-received frame if the sender pauses too long between bytes. */
@@ -184,10 +179,11 @@ static void Protocol_SendByte(uint8_t byte)
     }
 }
 
-/* Build and send one complete protocol frame, including header and checksum. */
+/* Build and send one complete protocol frame, including header and CRC16. */
 static void Protocol_SendFrame(uint8_t seq, uint8_t cmd, const uint8_t *data, uint8_t len)
 {
     ProtocolFrame frame;
+    uint16_t crc;
     uint8_t i;
 
     if (len > PROTO_MAX_DATA_LEN)
@@ -215,7 +211,9 @@ static void Protocol_SendFrame(uint8_t seq, uint8_t cmd, const uint8_t *data, ui
         Protocol_SendByte(frame.data[i]);
     }
 
-    Protocol_SendByte(Protocol_CalcChecksum(&frame));
+    crc = Protocol_CalcFrameCrc16(&frame);
+    Protocol_SendByte((uint8_t)(crc & 0xFF));
+    Protocol_SendByte((uint8_t)(crc >> 8));
 }
 
 static void Protocol_SendAck(uint8_t seq, uint8_t source_cmd, uint8_t err_code)
@@ -354,12 +352,6 @@ void App_ProtocolPractice_Init(void)
     s_buzzer_state = 0;
 
     printf("Binary protocol practice ready. See protocol_practice_protocol.md\r\n");
-
-    /*
-     * Keep this call in the module so the CRC16 lesson has real code to read.
-     * The current practice frame still uses the simpler 8-bit checksum.
-     */
-    (void)Protocol_CalcCrc16((const uint8_t *)"CRC", 3);
 }
 
 uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
@@ -422,7 +414,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
 
             if (s_rx_frame.len == 0)
             {
-                s_rx_state = PROTO_RX_WAIT_CHECKSUM;
+                s_rx_state = PROTO_RX_WAIT_CRC_LO;
             }
             else
             {
@@ -436,12 +428,21 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
 
             if (s_data_count >= s_rx_frame.len)
             {
-                s_rx_state = PROTO_RX_WAIT_CHECKSUM;
+                s_rx_state = PROTO_RX_WAIT_CRC_LO;
             }
             return 1;
 
-        case PROTO_RX_WAIT_CHECKSUM:
-            if (byte == Protocol_CalcChecksum(&s_rx_frame))
+        case PROTO_RX_WAIT_CRC_LO:
+            s_rx_crc_low = byte;
+            s_rx_state = PROTO_RX_WAIT_CRC_HI;
+            return 1;
+
+        case PROTO_RX_WAIT_CRC_HI:
+        {
+            uint16_t received_crc;
+
+            received_crc = (uint16_t)s_rx_crc_low | ((uint16_t)byte << 8);
+            if (received_crc == Protocol_CalcFrameCrc16(&s_rx_frame))
             {
                 /* Keep command handling out of the IRQ; queue for Task(). */
                 Protocol_PushFrameFromIrq();
@@ -453,6 +454,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
 
             Protocol_ResetRx();
             return 1;
+        }
 
         default:
             Protocol_ResetRx();

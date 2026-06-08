@@ -18,8 +18,8 @@
 | 中断接收字节 | `SYSTEM/usart/usart.c` | 每收到 1 字节进入 `USART1_IRQHandler` |
 | 文本行接收 | `SYSTEM/usart/usart.c`、`User/app_uart_practice.c` | 以 CR/LF 作为一行结束，主循环解析完整命令 |
 | 文本命令解析 | `User/app_uart_practice.c` | 支持大小写兼容、参数解析、命令表分发 |
-| 二进制协议状态机 | `User/app_protocol_practice.c` | 按 `AA 55 SEQ LEN CMD DATA CHECKSUM` 逐字节解析 |
-| 校验和 | `User/app_protocol_practice.c` | 使用 8 位累加和校验帧内容 |
+| 二进制协议状态机 | `User/app_protocol_practice.c` | 按 `AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI` 逐字节解析 |
+| CRC16 | `User/app_protocol_practice.c` | 使用 CRC-16/Modbus 校验帧内容 |
 | ACK 和错误码 | `User/app_protocol_practice.c` | 每条命令返回 ACK，携带原命令和执行结果 |
 | SEQ 序列号 | `User/app_protocol_practice.c`、`Tools/uart_protocol_host.py` | 上位机发起 SEQ，STM32 原样带回，防止响应错配 |
 | 接收超时 | `User/app_protocol_practice.c` | 半包超过 50ms 未完成时丢弃并复位状态机 |
@@ -92,7 +92,7 @@ Binary protocol practice ready. See protocol_practice_protocol.md
 最终帧格式：
 
 ```text
-AA 55 SEQ LEN CMD DATA CHECKSUM
+AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
 ```
 
 字段含义：
@@ -104,7 +104,15 @@ AA 55 SEQ LEN CMD DATA CHECKSUM
 | `LEN` | DATA 长度，不包含 CMD |
 | `CMD` | 命令字 |
 | `DATA` | 参数区，可为空 |
-| `CHECKSUM` | `SEQ + LEN + CMD + DATA` 的低 8 位 |
+| `CRC_LO CRC_HI` | `SEQ + LEN + CMD + DATA` 的 CRC-16/Modbus，低字节先发送 |
+
+CRC 参数：
+
+```text
+初值: 0xFFFF
+多项式: 0xA001（反射形式）
+结果异或: 0x0000
+```
 
 命令字：
 
@@ -120,22 +128,22 @@ AA 55 SEQ LEN CMD DATA CHECKSUM
 常用 HEX 示例：
 
 ```text
-PING:      AA 55 01 00 01 02
-LED OFF:   AA 55 02 01 02 00 05
-LED RED:   AA 55 03 01 02 01 07
-LED AUTO:  AA 55 06 01 02 04 0D
-STATUS:    AA 55 07 00 03 0A
-BUZZER ON: AA 55 09 01 04 01 0F
+PING:      AA 55 01 00 01 E1 C0
+LED OFF:   AA 55 02 01 02 00 51 3C
+LED RED:   AA 55 03 01 02 01 91 00
+LED AUTO:  AA 55 06 01 02 04 51 CF
+STATUS:    AA 55 07 00 03 80 00
+BUZZER ON: AA 55 09 01 04 01 91 78
 ```
 
 ACK 示例：
 
 ```text
 PING 成功:
-AA 55 01 02 80 01 00 84
+AA 55 01 02 80 01 00 18 00
 
 LED 红灯成功:
-AA 55 03 02 80 02 00 87
+AA 55 03 02 80 02 00 61 30
 ```
 
 错误码：
@@ -228,7 +236,7 @@ gcc 练习\protocol_test_host.c -o 练习\output\protocol_test_host.exe
 测试覆盖：
 
 - 正确帧解析和响应
-- 校验错误丢弃
+- CRC16 错误丢弃
 - `AA AA 55` 重同步
 - LED 参数错误
 - PING 响应
@@ -365,7 +373,7 @@ Project/led.uvprojx
 - 串口助手必须使用 HEX 发送。
 - 检查帧头是否为 `AA 55`。
 - 检查 `LEN` 是否等于 DATA 长度。
-- 检查 `CHECKSUM` 是否正确。
+- 检查 `CRC_LO CRC_HI` 是否正确，且低字节在前。
 - 如果发送半包后停顿超过 50ms，MCU 会主动丢弃这帧。
 
 ### 交通灯被 UI 或串口改乱
@@ -379,14 +387,14 @@ LED AUTO
 或二进制帧：
 
 ```text
-AA 55 06 01 02 04 0D
+AA 55 06 01 02 04 51 CF
 ```
 
 即可恢复光照自动控制。
 
 ## 后续练习方向
 
-- 把二进制协议校验从 8 位 checksum 升级为 CRC16。
+- 增加 CRC 错误类型和错误计数的独立统计。
 - 给协议加入设备地址，练习一主多从通信。
 - 增加 `TEMP?`、`LIGHT?` 等文本命令。
 - 将光照阈值保存到 Flash。

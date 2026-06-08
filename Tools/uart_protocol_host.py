@@ -2,10 +2,12 @@
 """Host-side helper for the STM32 UART binary protocol.
 
 Frame format:
-    AA 55 SEQ LEN CMD DATA CHECKSUM
+    AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI
 
-Checksum:
-    low 8 bits of SEQ + LEN + CMD + all DATA bytes.
+CRC:
+    CRC-16/Modbus over SEQ + LEN + CMD + DATA.
+    Parameters: init=0xFFFF, reflected polynomial=0xA001.
+    The low CRC byte is transmitted first.
 
 The host owns SEQ generation. Retries reuse the same SEQ. A response is accepted
 only when its SEQ matches the pending request.
@@ -45,16 +47,27 @@ class ProtocolError(Exception):
     pass
 
 
-def calc_checksum(seq: int, cmd: int, data: bytes) -> int:
-    return (seq + len(data) + cmd + sum(data)) & 0xFF
+def calc_crc16(seq: int, cmd: int, data: bytes) -> int:
+    crc = 0xFFFF
+
+    for byte in bytes([seq, len(data), cmd]) + data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+
+    return crc
 
 
 def build_frame(seq: int, cmd: int, data: bytes = b"") -> bytes:
     if len(data) > MAX_DATA_LEN:
         raise ValueError("data too long")
 
-    check = calc_checksum(seq, cmd, data)
-    return bytes([HEAD_1, HEAD_2, seq, len(data), cmd]) + data + bytes([check])
+    crc = calc_crc16(seq, cmd, data)
+    crc_bytes = bytes([crc & 0xFF, crc >> 8])
+    return bytes([HEAD_1, HEAD_2, seq, len(data), cmd]) + data + crc_bytes
 
 
 def read_exact(port, size: int, deadline: float) -> bytes:
@@ -95,11 +108,14 @@ def read_frame(port, timeout_s: float) -> Frame:
         raise ProtocolError(f"invalid length: {length}")
 
     data = read_exact(port, length, deadline)
-    check = read_exact(port, 1, deadline)[0]
-    expected = calc_checksum(seq, cmd, data)
+    crc_bytes = read_exact(port, 2, deadline)
+    received_crc = crc_bytes[0] | (crc_bytes[1] << 8)
+    expected_crc = calc_crc16(seq, cmd, data)
 
-    if check != expected:
-        raise ProtocolError(f"bad checksum: got 0x{check:02X}, expected 0x{expected:02X}")
+    if received_crc != expected_crc:
+        raise ProtocolError(
+            f"bad CRC16: got 0x{received_crc:04X}, expected 0x{expected_crc:04X}"
+        )
 
     return Frame(seq=seq, cmd=cmd, data=data)
 

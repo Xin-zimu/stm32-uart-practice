@@ -1,13 +1,14 @@
 static uint8_t s_rx_len;
 static uint8_t s_rx_index;
 static uint8_t s_rx_payload[PROTO_MAX_DATA_LEN];
+static uint8_t s_rx_crc_low;
 static uint32_t s_last_rx_tick;
 
 /*
  * Standalone protocol exercise code.
  *
  * The frame is intentionally small for learning:
- * AA 55 LEN PAYLOAD CHECK, where PAYLOAD starts with CMD and SEQ.
+ * AA 55 LEN PAYLOAD CRC_LO CRC_HI, where PAYLOAD starts with CMD and SEQ.
  */
 #define PROTO_RX_TIMEOUT_MS  50u
 
@@ -30,23 +31,43 @@ void Protocol_InputByteWithTime(uint8_t byte, uint32_t now_ms);
 void Protocol_CheckTimeout(uint32_t now_ms);
 uint8_t HandleLedSet(const uint8_t *data, uint8_t data_len);
 
-uint8_t Protocol_CalcChecksum(uint8_t len, const uint8_t *payload)
+static uint16_t Protocol_UpdateCrc16(uint16_t crc, uint8_t byte)
 {
-    uint16_t sum = 0;
-    sum += len;
+    crc ^= byte;
 
-    /* CHECK = low 8 bits of LEN + all payload bytes. */
-    for(uint8_t i = 0; i < len; i++)
+    for(uint8_t bit = 0; bit < 8; bit++)
     {
-        sum += payload[i];
+        if((crc & 0x0001) != 0)
+        {
+            crc = (uint16_t)((crc >> 1) ^ 0xA001);
+        }
+        else
+        {
+            crc = (uint16_t)(crc >> 1);
+        }
     }
 
-    return (uint8_t)(sum & 0xFF);
+    return crc;
+}
+
+uint16_t Protocol_CalcCrc16(uint8_t len, const uint8_t *payload)
+{
+    uint16_t crc = 0xFFFF;
+
+    crc = Protocol_UpdateCrc16(crc, len);
+    for(uint8_t i = 0; i < len; i++)
+    {
+        crc = Protocol_UpdateCrc16(crc, payload[i]);
+    }
+
+    return crc;
 }
 
 /* Send a complete frame through the UART abstraction used by MCU and tests. */
 void Protocol_SendFrame(const uint8_t *payload, uint8_t len)
 {
+    uint16_t crc;
+
     /* Invalid parameters must not send a partial frame header. */
     if(payload == NULL)
     {
@@ -61,7 +82,7 @@ void Protocol_SendFrame(const uint8_t *payload, uint8_t len)
         return;
     }
 
-    /* Frame format: AA 55 LEN PAYLOAD CHECK. */
+    /* Frame format: AA 55 LEN PAYLOAD CRC_LO CRC_HI. */
     Uart_SendByte(0xAA);
     Uart_SendByte(0x55);
     Uart_SendByte(len);
@@ -71,7 +92,9 @@ void Protocol_SendFrame(const uint8_t *payload, uint8_t len)
         Uart_SendByte(payload[i]);
     }
 
-    Uart_SendByte(Protocol_CalcChecksum(len, payload));
+    crc = Protocol_CalcCrc16(len, payload);
+    Uart_SendByte((uint8_t)(crc & 0xFF));
+    Uart_SendByte((uint8_t)(crc >> 8));
 }
 
 static void Protocol_SendStatus(uint8_t rsp_cmd, uint8_t seq, uint8_t status)
@@ -92,7 +115,8 @@ typedef enum
     PROTO_STATE_WAIT_55,
     PROTO_STATE_WAIT_LEN,
     PROTO_STATE_RECV_PAYLOAD,
-    PROTO_STATE_WAIT_CHECK
+    PROTO_STATE_WAIT_CRC_LO,
+    PROTO_STATE_WAIT_CRC_HI
 } ProtocolState_t;
 
 static ProtocolState_t s_rx_state = PROTO_STATE_WAIT_AA;
@@ -102,6 +126,7 @@ static void Protocol_ResetRx(void)
 {
     s_rx_len = 0;
     s_rx_index = 0;
+    s_rx_crc_low = 0;
     s_rx_state = PROTO_STATE_WAIT_AA;
 }
 
@@ -173,15 +198,21 @@ void Protocol_InputByteWithTime(uint8_t byte, uint32_t now_ms)
             s_rx_payload[s_rx_index++] = byte;
             if(s_rx_index == s_rx_len)
             {
-                s_rx_state = PROTO_STATE_WAIT_CHECK;
+                s_rx_state = PROTO_STATE_WAIT_CRC_LO;
             }
             break;
 
-        case PROTO_STATE_WAIT_CHECK:
-        {
-            uint8_t check = Protocol_CalcChecksum(s_rx_len, s_rx_payload);
+        case PROTO_STATE_WAIT_CRC_LO:
+            s_rx_crc_low = byte;
+            s_rx_state = PROTO_STATE_WAIT_CRC_HI;
+            break;
 
-            if(byte == check)
+        case PROTO_STATE_WAIT_CRC_HI:
+        {
+            uint16_t received_crc;
+
+            received_crc = (uint16_t)s_rx_crc_low | ((uint16_t)byte << 8);
+            if(received_crc == Protocol_CalcCrc16(s_rx_len, s_rx_payload))
             {
                 /* Only verified frames are dispatched. */
                 Protocol_Dispatch(s_rx_payload, s_rx_len);

@@ -5,13 +5,13 @@
 当前帧格式：
 
 ```text
-AA 55 LEN PAYLOAD CHECK
+AA 55 LEN PAYLOAD CRC_LO CRC_HI
 ```
 
 示例请求：
 
 ```text
-AA 55 04 01 10 01 01 17
+AA 55 04 01 10 01 01 15 A9
 ```
 
 含义：
@@ -20,7 +20,7 @@ AA 55 04 01 10 01 01 17
 AA 55         帧头
 04            LEN
 01 10 01 01   PAYLOAD
-17            CHECK
+15 A9         CRC_LO CRC_HI
 ```
 
 ## 2. 字段含义
@@ -30,7 +30,7 @@ AA 55         帧头
 | `AA 55` | 2 字节 | 固定帧头 |
 | `LEN` | 1 字节 | PAYLOAD 长度 |
 | `PAYLOAD` | `LEN` 字节 | 命令号和命令参数 |
-| `CHECK` | 1 字节 | 校验和 |
+| `CRC_LO CRC_HI` | 2 字节 | CRC-16/Modbus，低字节在前 |
 
 规则：
 
@@ -120,7 +120,7 @@ RSP_CMD SEQ STATUS
 成功示例：
 
 ```text
-AA 55 03 81 10 00 94
+AA 55 03 81 10 00 5D 88
 ```
 
 含义：
@@ -130,7 +130,7 @@ AA 55 03 81 10 00 94
 81      CMD_LED_SET_RSP
 10      SEQ
 00      STATUS_OK
-94      CHECK
+5D 88   CRC_LO CRC_HI
 ```
 
 ### 5.2 PING 回复
@@ -138,7 +138,7 @@ AA 55 03 81 10 00 94
 成功示例：
 
 ```text
-AA 55 03 82 13 00 98
+AA 55 03 82 13 00 AD 78
 ```
 
 含义：
@@ -148,7 +148,7 @@ AA 55 03 82 13 00 98
 82      CMD_PING_RSP
 13      SEQ
 00      STATUS_OK
-98      CHECK
+AD 78   CRC_LO CRC_HI
 ```
 
 ### 5.3 未知命令回复
@@ -162,13 +162,13 @@ CMD_ERROR_RSP SEQ STATUS ORIGINAL_CMD
 示例请求：
 
 ```text
-AA 55 02 09 14 1F
+AA 55 02 09 14 D6 5F
 ```
 
 响应：
 
 ```text
-AA 55 04 FF 14 04 09 24
+AA 55 04 FF 14 04 09 67 16
 ```
 
 含义：
@@ -179,7 +179,7 @@ FF      CMD_ERROR_RSP
 14      SEQ
 04      PROTO_STATUS_UNKNOWN_CMD
 09      原始未知命令
-24      CHECK
+67 16   CRC_LO CRC_HI
 ```
 
 ## 6. 错误码
@@ -194,42 +194,29 @@ FF      CMD_ERROR_RSP
 
 ## 7. 校验方式
 
-校验规则：
+当前使用 CRC-16/Modbus：
 
 ```text
-CHECK = LEN + PAYLOAD 所有字节相加，只保留低 8 位
-```
-
-等价 C 逻辑：
-
-```c
-uint8_t check = (uint8_t)((len + payload[0] + payload[1] + ...) & 0xFF);
+CRC 输入 = LEN + PAYLOAD
+初值 = 0xFFFF
+多项式 = 0xA001（反射形式）
+结果异或 = 0x0000
+发送顺序 = CRC_LO CRC_HI
 ```
 
 示例：
 
 ```text
-AA 55 04 01 10 01 01 17
-```
-
-计算：
-
-```text
-04 + 01 + 10 + 01 + 01 = 17
-```
-
-溢出示例：
-
-```text
-03 + FF + 04 + 09 = 10F
-低 8 位 = 0F
+输入字节：04 01 10 01 01
+CRC16：0xA915
+线上发送：15 A9
 ```
 
 ## 8. 大小端规则
 
-当前协议只使用 1 字节字段，所以目前不涉及大小端问题。
+CRC16 固定低字节在前，这是 CRC-16/Modbus 常用发送顺序。
 
-后续如果加入多字节整数，建议统一使用：
+业务数据如果加入多字节整数，仍建议统一使用：
 
 ```text
 大端序。
@@ -307,7 +294,7 @@ Protocol_CheckTimeout(now_ms)
 超时的作用：
 
 ```text
-当中间丢字节时，状态机不会一直卡在 RECV_PAYLOAD 或 WAIT_CHECK。
+当中间丢字节时，状态机不会一直卡在 RECV_PAYLOAD、WAIT_CRC_LO 或 WAIT_CRC_HI。
 ```
 
 ## 11. 可靠通信规则
@@ -317,7 +304,7 @@ Protocol_CheckTimeout(now_ms)
 ```text
 帧头：用于同步帧起点
 LEN：用于确定帧边界
-CHECK：用于检测数据损坏
+CRC16：用于检测数据损坏
 SEQ：用于匹配请求和响应
 STATUS：用于反馈命令执行结果
 UNKNOWN_CMD：用于反馈未知命令
@@ -391,7 +378,8 @@ WAIT_AA
 WAIT_55
 WAIT_LEN
 RECV_PAYLOAD
-WAIT_CHECK
+WAIT_CRC_LO
+WAIT_CRC_HI
 ```
 
 解析依赖：
@@ -399,7 +387,7 @@ WAIT_CHECK
 ```text
 帧头：找到一帧的开始
 LEN：知道 PAYLOAD 要收几个字节
-CHECK：确认这一帧是否有效
+CRC16：确认这一帧是否有效
 Dispatch：把 PAYLOAD 转换成具体命令
 ```
 
@@ -418,7 +406,7 @@ PAYLOAD 是否结束只能看 LEN。
 ```text
 上位机发送请求帧
 MCU 解析帧
-MCU 校验 CHECK
+MCU 校验 CRC16
 MCU 分发命令
 MCU 执行命令
 MCU 返回响应帧
