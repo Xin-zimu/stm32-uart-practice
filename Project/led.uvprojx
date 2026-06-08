@@ -710,6 +710,16 @@
               <FilePath>..\SYSTEM\usart\usart.h</FilePath>
             </File>
             <File>
+              <FileName>uart_tx.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\SYSTEM\usart\uart_tx.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_tx.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\SYSTEM\usart\uart_tx.h</FilePath>
+            </File>
+            <File>
               <FileName>timing.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\SYSTEM\timing\timing.c</FilePath>

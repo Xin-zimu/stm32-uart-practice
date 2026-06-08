@@ -1,8 +1,8 @@
 #include "sys.h"
 #include "usart.h"	  
+#include "uart_tx.h"
 #include "app_protocol_practice.h"
 
-#define USART_TX_TIMEOUT 100000u
 ////////////////////////////////////////////////////////////////////////////////// 	 
 //如果使用ucos,则包括下面的头文件即可.
 #if SYSTEM_SUPPORT_OS
@@ -34,22 +34,11 @@ void _sys_exit(int x)
 //重定义fputc函数 
 int fputc(int ch, FILE *f)
 {
-    u32 timeout;
+    u8 byte;
 
     (void)f;
-
-    timeout = USART_TX_TIMEOUT;
-    while ((USART1->SR & 0X40) == 0)
-    {
-        if (timeout == 0)
-        {
-            return ch;
-        }
-
-        timeout--;
-    }
-
-    USART1->DR = (u8)ch;
+    byte = (u8)ch;
+    (void)UartTx_TryByte(byte);
     return ch;
 }
 #endif 
@@ -119,6 +108,7 @@ void uart_init(u32 bound){
 	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;	//收发模式
 
   USART_Init(USART1, &USART_InitStructure); //初始化串口1
+  UartTx_Init();                            //初始化非阻塞 TX 环形缓冲
   USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);//开启串口接受中断
   USART_Cmd(USART1, ENABLE);                    //使能串口1 
 
@@ -155,10 +145,10 @@ void USART1_IRQHandler(void)                	//串口1中断服务程序
 				}		 
 			}   		 
             }
-     } 
+     }
+    UartTx_IRQHandler();
 #if SYSTEM_SUPPORT_OS 	//如果SYSTEM_SUPPORT_OS为真，则需要支持OS.
 	OSIntExit();  											 
 #endif
 } 
 #endif	
-

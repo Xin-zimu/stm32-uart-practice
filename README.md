@@ -16,6 +16,7 @@
 | USART1 初始化 | `SYSTEM/usart/usart.c` | PA9 为 TX，PA10 为 RX，115200 8N1，开启接收中断 |
 | `printf` 重定向 | `SYSTEM/usart/usart.c` | 将 `printf` 输出重定向到 USART1，方便调试 |
 | 中断接收字节 | `SYSTEM/usart/usart.c` | 每收到 1 字节进入 `USART1_IRQHandler` |
+| 非阻塞串口发送 | `SYSTEM/usart/uart_tx.c` | 256 字节 TX 环形缓冲，由 TXE 中断逐字节发送 |
 | 文本行接收 | `SYSTEM/usart/usart.c`、`User/app_uart_practice.c` | 以 CR/LF 作为一行结束，主循环解析完整命令 |
 | 文本命令解析 | `User/app_uart_practice.c` | 支持大小写兼容、参数解析、命令表分发 |
 | 二进制协议状态机 | `User/app_protocol_practice.c` | 按 `AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI` 逐字节解析 |
@@ -160,6 +161,7 @@ AA 55 03 02 80 02 00 61 30
 
 - `protocol_practice_protocol.md`
 - `crc16_learning.md`
+- `uart_tx_ring_buffer_learning.md`
 - `练习/protocol_document.md`
 
 ## 串口接收流程
@@ -253,6 +255,16 @@ gcc 练习\protocol_test_host.c -o 练习\output\protocol_test_host.exe
 ALL TESTS PASSED
 ```
 
+TX 环形缓冲测试：
+
+```powershell
+gcc 练习\uart_tx_test_host.c -o 练习\output\uart_tx_test_host.exe
+练习\output\uart_tx_test_host.exe
+```
+
+该测试验证整块入队、协议保留空间、队列满时整块拒绝、缓冲区回绕、
+发送顺序以及队列为空后自动关闭 TXE 中断。
+
 ## 其他外设功能
 
 虽然项目主线是串口通信，但外设提供了真实控制对象和状态数据。
@@ -299,13 +311,14 @@ while (1)
 }
 ```
 
-这是一个非阻塞任务轮询结构。串口中断只负责收字节，真正的命令执行和界面刷新都放在主循环任务中。
+这是一个非阻塞任务轮询结构。串口中断负责接收字节和从 TX 环形缓冲发送字节，真正的命令执行和界面刷新都放在主循环任务中。
 
 ## 软件结构
 
 ```text
 SYSTEM/usart/
-  usart.c/.h              USART1 初始化、printf 重定向、接收中断
+  usart.c/.h              USART1 初始化、printf 重定向、统一收发中断
+  uart_tx.c/.h            TX 环形缓冲、整块入队和 TXE 中断发送
 
 Tools/
   uart_protocol_host.py   二进制协议上位机脚本
@@ -341,6 +354,7 @@ Project/led.uvprojx
 确认这些文件已经加入编译：
 
 - `SYSTEM/usart/usart.c`
+- `SYSTEM/usart/uart_tx.c`
 - `User/app_uart_practice.c`
 - `User/app_protocol_practice.c`
 - `User/app_light.c`

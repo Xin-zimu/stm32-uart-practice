@@ -36,14 +36,14 @@
 #include "app_protocol_practice.h"    // 本模块对外接口和 STM32 基础类型
 #include "app_light.h"                // 交通灯控制、AO 值和亮暗状态接口
 #include "timing.h"                   // 毫秒节拍，用于接收半包超时判断
-#include "stm32f10x_usart.h"          // USART1 发送和状态标志接口
+#include "uart_tx.h"                  // USART1 TX 环形缓冲和整块入队接口
 #include <stdio.h>                    // printf 初始化提示
 
 #define PROTO_HEAD_1             0xAA        // 固定帧头第一个字节
 #define PROTO_HEAD_2             0x55        // 固定帧头第二个字节
 #define PROTO_MAX_DATA_LEN       16          // DATA 最大长度，也是接收数组容量
+#define PROTO_MAX_FRAME_LEN      (7u + PROTO_MAX_DATA_LEN) // 完整帧最大字节数
 #define PROTO_RX_TIMEOUT_MS      50u         // 相邻接收字节最大允许间隔，单位 ms
-#define PROTO_TX_TIMEOUT         100000u     // 等待 USART TXE 的最大轮询次数
 
 #define PROTO_CMD_PING           0x01        // 通信测试，DATA 必须为空
 #define PROTO_CMD_LED            0x02        // 设置交通灯模式
@@ -238,33 +238,6 @@ static void Protocol_PushFrameFromIrq(void)
 }
 
 /*
- * 通过 USART1 发送一个字节。
- *
- * 写入数据寄存器后等待 TXE 置位，表示可以继续写下一个字节。
- * 等待循环设置了最大轮询次数，防止 USART 状态异常时永久卡死。
- *
- * 如果等待超时，本函数直接返回。上层可能已经发送出一个残帧，
- * 接收方会依靠 LEN、CRC 和半包超时机制将残帧丢弃。
- */
-static void Protocol_SendByte(uint8_t byte)
-{
-    uint32_t timeout;
-
-    USART_SendData(USART1, byte);
-
-    timeout = PROTO_TX_TIMEOUT;
-    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET)
-    {
-        if (timeout == 0)
-        {
-            return;
-        }
-
-        timeout--;
-    }
-}
-
-/*
  * 组装并发送一个完整协议帧。
  *
  * 参数：
@@ -282,6 +255,8 @@ static void Protocol_SendByte(uint8_t byte)
 static void Protocol_SendFrame(uint8_t seq, uint8_t cmd, const uint8_t *data, uint8_t len)
 {
     ProtocolFrame frame;
+    uint8_t packet[PROTO_MAX_FRAME_LEN];
+    uint8_t packet_len;
     uint16_t crc;
     uint8_t i;
 
@@ -299,20 +274,27 @@ static void Protocol_SendFrame(uint8_t seq, uint8_t cmd, const uint8_t *data, ui
         frame.data[i] = data[i];
     }
 
-    Protocol_SendByte(PROTO_HEAD_1);
-    Protocol_SendByte(PROTO_HEAD_2);
-    Protocol_SendByte(frame.seq);
-    Protocol_SendByte(frame.len);
-    Protocol_SendByte(frame.cmd);
+    packet_len = 0;
+    packet[packet_len++] = PROTO_HEAD_1;
+    packet[packet_len++] = PROTO_HEAD_2;
+    packet[packet_len++] = frame.seq;
+    packet[packet_len++] = frame.len;
+    packet[packet_len++] = frame.cmd;
 
     for (i = 0; i < frame.len; i++)
     {
-        Protocol_SendByte(frame.data[i]);
+        packet[packet_len++] = frame.data[i];
     }
 
     crc = Protocol_CalcFrameCrc16(&frame);
-    Protocol_SendByte((uint8_t)(crc & 0xFF));             // CRC 低字节先发送
-    Protocol_SendByte((uint8_t)(crc >> 8));               // CRC 高字节后发送
+    packet[packet_len++] = (uint8_t)(crc & 0xFF);         // CRC 低字节先发送
+    packet[packet_len++] = (uint8_t)(crc >> 8);           // CRC 高字节后发送
+
+    /*
+     * 整帧一次性入队。空间不足时整个帧都失败，不会发送残缺协议帧。
+     * 失败次数由 uart_tx 模块的 drop_count 统一记录。
+     */
+    (void)UartTx_TryWrite(packet, packet_len);
 }
 
 /*
