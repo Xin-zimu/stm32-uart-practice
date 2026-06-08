@@ -159,6 +159,7 @@ AA 55 03 02 80 02 00 61 30
 更完整的协议说明见：
 
 - `protocol_practice_protocol.md`
+- `crc16_learning.md`
 - `练习/protocol_document.md`
 
 ## 串口接收流程
