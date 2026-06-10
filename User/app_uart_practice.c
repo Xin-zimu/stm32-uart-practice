@@ -1,17 +1,19 @@
 #include "app_uart_practice.h"
 #include "app_light.h"
 #include "app_temp.h"
+#include "app_protocol_practice.h"
+#include "uart_rx.h"
 #include "usart.h"
 #include <stdio.h>
 
-/* USART_RX_STA æ ‡å¿—ä½å®šä¹‰ */
-#define UART_LINE_DONE      0x8000  /* bit15ï¼šæ”¶åˆ°å®Œæ•´ä¸€è¡Œ */
-#define UART_LINE_LEN_MASK  0x3FFF  /* bit0~13ï¼šè¿™ä¸€è¡Œçš„å­—èŠ‚æ•° */
+static char s_line_buffer[USART_REC_LEN + 1];
+static uint16_t s_line_len = 0;
+static uint8_t s_line_overflow = 0;
 
 /**
- * StrEqual - åˆ¤æ–­ä¸¤ä¸ªå­—ç¬¦ä¸²æ˜¯å¦å®Œå…¨ç›¸ç­‰
- * a, bï¼šè¦æ¯”è¾ƒçš„å­—ç¬¦ä¸²
- * è¿”å› 1 ç›¸ç­‰ï¼Œ0 ä¸ç­‰
+ * StrEqual - ÅĞ¶ÏÁ½¸ö×Ö·û´®ÊÇ·ñÍêÈ«ÏàµÈ
+ * a, b£ºÒª±È½ÏµÄ×Ö·û´®
+ * ·µ»Ø 1 ÏàµÈ£¬0 ²»µÈ
  */
 static int StrEqual(const char *a, const char *b)
 {
@@ -30,8 +32,8 @@ static int StrEqual(const char *a, const char *b)
 }
 
 /**
- * StrStartsWith - åˆ¤æ–­ text æ˜¯å¦ä»¥ prefix å¼€å¤´
- * ç”¨äºè¯†åˆ«å¸¦å‚æ•°çš„å‘½ä»¤ï¼Œå¦‚ "LED RED" ä»¥ "LED " å¼€å¤´
+ * StrStartsWith - ÅĞ¶Ï text ÊÇ·ñÒÔ prefix ¿ªÍ·
+ * ÓÃÓÚÊ¶±ğ´ø²ÎÊıµÄÃüÁî£¬Èç "LED RED" ÒÔ "LED " ¿ªÍ·
  */
 static int StrStartsWith(const char *text, const char *prefix)
 {
@@ -49,7 +51,7 @@ static int StrStartsWith(const char *text, const char *prefix)
     return 1;
 }
 
-/* è€ C åº“ç¯å¢ƒä¸‹ä¸ç”¨ strlenï¼Œä¿æŒå¯¹ Keil C çš„å…¼å®¹æ€§ã€‚ */
+/* ÀÏ C ¿â»·¾³ÏÂ²»ÓÃ strlen£¬±£³Ö¶Ô Keil C µÄ¼æÈİĞÔ¡£ */
 static uint16_t StrLen(const char *text)
 {
     uint16_t len;
@@ -66,8 +68,8 @@ static uint16_t StrLen(const char *text)
 }
 
 /**
- * ToUpperString - æŠŠå­—ç¬¦ä¸²å…¨éƒ¨è½¬æˆå¤§å†™
- * è¿™æ ·ç”¨æˆ·è¾“å…¥ help/Help/HELP éƒ½èƒ½è¢«è¯†åˆ«
+ * ToUpperString - °Ñ×Ö·û´®È«²¿×ª³É´óĞ´
+ * ÕâÑùÓÃ»§ÊäÈë help/Help/HELP ¶¼ÄÜ±»Ê¶±ğ
  */
 static void ToUpperString(char *text)
 {
@@ -83,8 +85,8 @@ static void ToUpperString(char *text)
 }
 
 /**
- * SkipSpaces - è·³è¿‡å­—ç¬¦ä¸²å¼€å¤´çš„ç©ºæ ¼å’Œ Tab
- * è¿”å›ç¬¬ä¸€ä¸ªéç©ºç™½å­—ç¬¦çš„æŒ‡é’ˆ
+ * SkipSpaces - Ìø¹ı×Ö·û´®¿ªÍ·µÄ¿Õ¸ñºÍ Tab
+ * ·µ»ØµÚÒ»¸ö·Ç¿Õ°××Ö·ûµÄÖ¸Õë
  */
 static const char *SkipSpaces(const char *text)
 {
@@ -97,10 +99,10 @@ static const char *SkipSpaces(const char *text)
 }
 
 /**
- * ParseNumber - å°†å­—ç¬¦ä¸²è§£æä¸º uint16_t æ•°å­—
- * textï¼šè¦è§£æçš„å­—ç¬¦ä¸²ï¼Œå¦‚ "2000"
- * valueï¼šè¾“å‡ºå‚æ•°ï¼Œè§£ææˆåŠŸçš„æ•°å€¼
- * è¿”å› 1 æˆåŠŸï¼Œ0 å¤±è´¥ï¼ˆç©ºã€è¶…èŒƒå›´ã€å«éæ³•å­—ç¬¦ï¼‰
+ * ParseNumber - ½«×Ö·û´®½âÎöÎª uint16_t Êı×Ö
+ * text£ºÒª½âÎöµÄ×Ö·û´®£¬Èç "2000"
+ * value£ºÊä³ö²ÎÊı£¬½âÎö³É¹¦µÄÊıÖµ
+ * ·µ»Ø 1 ³É¹¦£¬0 Ê§°Ü£¨¿Õ¡¢³¬·¶Î§¡¢º¬·Ç·¨×Ö·û£©
  */
 static uint8_t ParseNumber(const char *text, uint16_t *value)
 {
@@ -136,8 +138,8 @@ static uint8_t ParseNumber(const char *text, uint16_t *value)
 }
 
 /**
- * PrintTemp10 - æ‰“å°æ¸©åº¦å€¼ï¼ˆå®é™…å€¼ = temp10 / 10ï¼‰
- * å¦‚ temp10 = 256 æ—¶æ‰“å° "25.6"
+ * PrintTemp10 - ´òÓ¡ÎÂ¶ÈÖµ£¨Êµ¼ÊÖµ = temp10 / 10£©
+ * Èç temp10 = 256 Ê±´òÓ¡ "25.6"
  */
 static void PrintTemp10(int16_t temp10)
 {
@@ -150,7 +152,7 @@ static void PrintTemp10(int16_t temp10)
     printf("%d.%d", temp10 / 10, temp10 % 10);
 }
 
-/* æŠŠå†…éƒ¨äº¤é€šç¯æ¨¡å¼è½¬æ¢ä¸º STATUS å‘½ä»¤ä¸­çš„å¯è¯»æ–‡æœ¬ã€‚ */
+/* °ÑÄÚ²¿½»Í¨µÆÄ£Ê½×ª»»Îª STATUS ÃüÁîÖĞµÄ¿É¶ÁÎÄ±¾¡£ */
 static const char *TrafficModeName(AppLightTrafficMode mode)
 {
     if (mode == APP_LIGHT_TRAFFIC_RED)
@@ -177,7 +179,7 @@ static const char *TrafficModeName(AppLightTrafficMode mode)
 }
 
 /**
- * PrintHelp - æ‰“å°æ‰€æœ‰å¯ç”¨å‘½ä»¤çš„å¸®åŠ©ä¿¡æ¯
+ * PrintHelp - ´òÓ¡ËùÓĞ¿ÉÓÃÃüÁîµÄ°ïÖúĞÅÏ¢
  */
 static void PrintHelp(void)
 {
@@ -198,7 +200,7 @@ static void PrintHelp(void)
 }
 
 /**
- * PrintStatus - æ‰“å°å½“å‰å…‰ç…§ã€æ¸©åº¦ã€LED æ¨¡å¼ç­‰çŠ¶æ€
+ * PrintStatus - ´òÓ¡µ±Ç°¹âÕÕ¡¢ÎÂ¶È¡¢LED Ä£Ê½µÈ×´Ì¬
  */
 static void PrintStatus(void)
 {
@@ -221,10 +223,10 @@ static void PrintStatus(void)
     printf("\r\n");
 }
 
-/* é¡¶å±‚å‘½ä»¤å¤„ç†å‡½æ•°ç­¾åï¼šraw_arg ä¿ç•™åŸå§‹å¤§å°å†™ï¼Œarg æ˜¯å¤§å†™åçš„å‚æ•°ã€‚ */
+/* ¶¥²ãÃüÁî´¦Àíº¯ÊıÇ©Ãû£ºraw_arg ±£ÁôÔ­Ê¼´óĞ¡Ğ´£¬arg ÊÇ´óĞ´ºóµÄ²ÎÊı¡£ */
 typedef void (*UartCommandHandler)(const char *raw_arg, const char *arg);
 
-/* é¡¶å±‚å‘½ä»¤è¡¨é¡¹ï¼Œallow_arg ç”¨äºæ‹¦æˆª HELP xxx è¿™ç±»é”™è¯¯è¾“å…¥ã€‚ */
+/* ¶¥²ãÃüÁî±íÏî£¬allow_arg ÓÃÓÚÀ¹½Ø HELP xxx ÕâÀà´íÎóÊäÈë¡£ */
 typedef struct
 {
     const char *name;
@@ -232,7 +234,7 @@ typedef struct
     UartCommandHandler handler;
 } UartCommand;
 
-/* LED å­å‘½ä»¤è¡¨é¡¹ï¼Œå°†æ–‡æœ¬å‘½ä»¤æ˜ å°„åˆ° app_light çš„äº¤é€šç¯æ¨¡å¼ã€‚ */
+/* LED ×ÓÃüÁî±íÏî£¬½«ÎÄ±¾ÃüÁîÓ³Éäµ½ app_light µÄ½»Í¨µÆÄ£Ê½¡£ */
 typedef struct
 {
     const char *name;
@@ -256,7 +258,7 @@ static void HandlePingCommand(const char *raw_arg, const char *arg)
 static void HandleEchoCommand(const char *raw_arg, const char *arg)
 {
     (void)arg;
-    /* ECHO éœ€è¦ä¿ç•™ç”¨æˆ·è¾“å…¥çš„åŸå§‹å¤§å°å†™ï¼Œæ‰€ä»¥ä½¿ç”¨ raw_argã€‚ */
+    /* ECHO ĞèÒª±£ÁôÓÃ»§ÊäÈëµÄÔ­Ê¼´óĞ¡Ğ´£¬ËùÒÔÊ¹ÓÃ raw_arg¡£ */
     printf("%s\r\n", SkipSpaces(raw_arg));
 }
 
@@ -268,14 +270,14 @@ static void HandleStatusCommand(const char *raw_arg, const char *arg)
 }
 
 /**
- * HandleLedCommand - å¤„ç† "LED xxx" å­å‘½ä»¤
+ * HandleLedCommand - ´¦Àí "LED xxx" ×ÓÃüÁî
  * RED / YELLOW / GREEN / OFF / AUTO
  */
 static void HandleLedCommand(const char *raw_arg, const char *arg)
 {
     /*
-     * å­å‘½ä»¤ä¹Ÿä½¿ç”¨è¡¨é©±åŠ¨ï¼Œåç»­æ–°å¢ BLINK ç­‰æ¨¡å¼æ—¶åªéœ€è¦æ‰©å±•è¡¨é¡¹ã€‚
-     * æ³¨æ„è¿™é‡Œä¸ç›´æ¥è°ƒç”¨ Traffic_*ï¼Œé¿å…ä¸²å£å±‚ç»•è¿‡ app_light çš„çŠ¶æ€æ¨¡å‹ã€‚
+     * ×ÓÃüÁîÒ²Ê¹ÓÃ±íÇı¶¯£¬ºóĞøĞÂÔö BLINK µÈÄ£Ê½Ê±Ö»ĞèÒªÀ©Õ¹±íÏî¡£
+     * ×¢ÒâÕâÀï²»Ö±½Óµ÷ÓÃ Traffic_*£¬±ÜÃâ´®¿Ú²ãÈÆ¹ı app_light µÄ×´Ì¬Ä£ĞÍ¡£
      */
     static const LedCommand led_commands[] =
     {
@@ -304,8 +306,8 @@ static void HandleLedCommand(const char *raw_arg, const char *arg)
 }
 
 /**
- * HandleThresholdCommand - å¤„ç† "TH" å­å‘½ä»¤
- * TH? æŸ¥è¯¢ / TH + åŠ  50 / TH - å‡ 50 / TH æ•°å­— è®¾æŒ‡å®šå€¼
+ * HandleThresholdCommand - ´¦Àí "TH" ×ÓÃüÁî
+ * TH? ²éÑ¯ / TH + ¼Ó 50 / TH - ¼õ 50 / TH Êı×Ö ÉèÖ¸¶¨Öµ
  */
 static void HandleThresholdCommand(const char *raw_arg, const char *arg)
 {
@@ -355,8 +357,8 @@ static uint8_t CommandMatch(const char *cmd,
     len = StrLen(name);
 
     /*
-     * å‘½ä»¤å¿…é¡»å®Œæ•´åŒ¹é…ä¸€ä¸ªå•è¯ã€‚
-     * ä¾‹å¦‚ LEDX ä¸åº”è¢«è¯†åˆ«ä¸º LED å‘½ä»¤ã€‚
+     * ÃüÁî±ØĞëÍêÕûÆ¥ÅäÒ»¸öµ¥´Ê¡£
+     * ÀıÈç LEDX ²»Ó¦±»Ê¶±ğÎª LED ÃüÁî¡£
      */
     if (StrStartsWith(cmd, name) == 0)
     {
@@ -379,7 +381,7 @@ static uint8_t CommandMatch(const char *cmd,
 
     if ((StrEqual(name, "TH")) && (next == '?'))
     {
-        /* å…¼å®¹ TH? è¿™ç§æ— ç©ºæ ¼å†™æ³•ã€‚ */
+        /* ¼æÈİ TH? ÕâÖÖÎŞ¿Õ¸ñĞ´·¨¡£ */
         *arg = cmd + len;
         return 1;
     }
@@ -390,8 +392,8 @@ static uint8_t CommandMatch(const char *cmd,
 static void DispatchCommand(const char *raw_line, const char *cmd)
 {
     /*
-     * é¡¶å±‚å‘½ä»¤è¡¨ã€‚
-     * è¿™é‡Œä½¿ç”¨æ™®é€šç»“æ„ä½“åˆå§‹åŒ–ï¼Œé¿å…å¤æ‚ designated initializer å½±å“è€ç¼–è¯‘å™¨ã€‚
+     * ¶¥²ãÃüÁî±í¡£
+     * ÕâÀïÊ¹ÓÃÆÕÍ¨½á¹¹Ìå³õÊ¼»¯£¬±ÜÃâ¸´ÔÓ designated initializer Ó°ÏìÀÏ±àÒëÆ÷¡£
      */
     static const UartCommand commands[] =
     {
@@ -414,7 +416,7 @@ static void DispatchCommand(const char *raw_line, const char *cmd)
             raw_arg = raw_line + StrLen(commands[i].name);
             trimmed_arg = SkipSpaces(arg);
 
-            /* ä¸å…è®¸å‚æ•°çš„å‘½ä»¤ï¼Œå¦‚æœåé¢è·Ÿäº†å†…å®¹ï¼Œç›´æ¥æŠ¥é”™ã€‚ */
+            /* ²»ÔÊĞí²ÎÊıµÄÃüÁî£¬Èç¹ûºóÃæ¸úÁËÄÚÈİ£¬Ö±½Ó±¨´í¡£ */
             if ((commands[i].allow_arg == 0) && (*trimmed_arg != '\0'))
             {
                 printf("ERR: %s takes no arguments\r\n", commands[i].name);
@@ -430,15 +432,15 @@ static void DispatchCommand(const char *raw_line, const char *cmd)
 }
 
 /**
- * HandleLine - ä¸²å£å‘½ä»¤åˆ†å‘
- * æŠŠæ”¶åˆ°çš„è¡Œè½¬å¤§å†™åï¼ŒåŒ¹é…æ˜¯å“ªä¸ªå‘½ä»¤ï¼Œäº¤ç»™å¯¹åº”çš„å¤„ç†å‡½æ•°
+ * HandleLine - ´®¿ÚÃüÁî·Ö·¢
+ * °ÑÊÕµ½µÄĞĞ×ª´óĞ´ºó£¬Æ¥ÅäÊÇÄÄ¸öÃüÁî£¬½»¸ø¶ÔÓ¦µÄ´¦Àíº¯Êı
  */
 static void HandleLine(char *line)
 {
     char cmd[USART_REC_LEN + 1];
     uint16_t i;
 
-    /* å¤åˆ¶æ”¶åˆ°çš„è¡Œåˆ° cmd ç¼“å†²åŒº */
+    /* ¸´ÖÆÊÕµ½µÄĞĞµ½ cmd »º³åÇø */
     for (i = 0; i < USART_REC_LEN; i++)
     {
         cmd[i] = line[i];
@@ -451,64 +453,108 @@ static void HandleLine(char *line)
 
     cmd[USART_REC_LEN] = '\0';
     /*
-     * cmd ç”¨äºå‘½ä»¤åŒ¹é…ï¼Œç»Ÿä¸€è½¬å¤§å†™ã€‚
-     * line ä¿ç•™åŸå§‹è¾“å…¥ï¼Œä¾› ECHO ç­‰éœ€è¦åŸå§‹æ–‡æœ¬çš„å‘½ä»¤ä½¿ç”¨ã€‚
+     * cmd ÓÃÓÚÃüÁîÆ¥Åä£¬Í³Ò»×ª´óĞ´¡£
+     * line ±£ÁôÔ­Ê¼ÊäÈë£¬¹© ECHO µÈĞèÒªÔ­Ê¼ÎÄ±¾µÄÃüÁîÊ¹ÓÃ¡£
      */
-    ToUpperString(cmd);           /* è½¬å¤§å†™ï¼Œä¸åŒºåˆ†å¤§å°å†™ */
+    ToUpperString(cmd);           /* ×ª´óĞ´£¬²»Çø·Ö´óĞ¡Ğ´ */
 
-    printf("RX: %s\r\n", line);   /* å›æ˜¾æ”¶åˆ°çš„åŸå§‹å†…å®¹ */
+    printf("RX: %s\r\n", line);   /* »ØÏÔÊÕµ½µÄÔ­Ê¼ÄÚÈİ */
 
     DispatchCommand(line, cmd);
 }
 
-/**
- * App_UARTPractice_Init - ä¸²å£å‘½ä»¤è¡Œåˆå§‹åŒ–
- * ä¸Šç”µæ—¶è°ƒç”¨ä¸€æ¬¡ï¼Œæ‰“å°æ¬¢è¿ä¿¡æ¯
+/*
+ * ³õÊ¼»¯´®¿ÚÎÄ±¾ÃüÁî½ÓÊÕ×´Ì¬²¢´òÓ¡»¶Ó­ĞÅÏ¢¡£
+ *
+ * RX »·ĞÎ»º³åÓÉ uart_init() ÔÚ¿ªÆô RXNE ÖĞ¶ÏÇ°³õÊ¼»¯¡£±¾º¯ÊıÖ»¸´Î»
+ * ÎÄ±¾ĞĞµÄ×é°ü×´Ì¬£¬±£Ö¤Ó¦ÓÃÖØĞÂ³õÊ¼»¯ºó²»»á¼ÌĞø´¦Àí¾ÉµÄ°ëĞĞÊı¾İ¡£
+ *
+ * ²ÎÊı£º
+ * ÎŞ¡£
+ *
+ * ·µ»ØÖµ£º
+ * ÎŞ¡£
  */
 void App_UARTPractice_Init(void)
 {
+    s_line_len = 0;
+    s_line_overflow = 0;
+
     printf("\r\nSTM32F103 UART practice ready.\r\n");
     printf("USART1: PA9=TX, PA10=RX, 115200 8N1.\r\n");
     printf("Send HELP for commands.\r\n\r\n");
 }
 
-/**
- * App_UARTPractice_Task - ä¸²å£å‘½ä»¤è¡Œä¸»ä»»åŠ¡
- * åœ¨ while(1) ä¸­åå¤è°ƒç”¨ï¼Œæ£€æŸ¥ä¸²å£æ˜¯å¦æœ‰æ–°è¡Œåˆ°è¾¾
- * å¦‚æœæ”¶åˆ°å®Œæ•´ä¸€è¡Œï¼Œå¤åˆ¶å‡ºæ¥äº¤ç»™ HandleLine å¤„ç†
+/*
+ * ½«Ò»¸ö·ÇĞ­Òé×Ö½Ú¼ÓÈëÎÄ±¾ÃüÁîĞĞ¡£
+ *
+ * CR »ò LF ½áÊøµ±Ç°ĞĞ£»Á¬ĞøµÄ CRLF ²»»á²úÉú¿ÕÃüÁî¡£³¬¹ı
+ * USART_REC_LEN µÄĞĞ»á±»ÕûĞĞ¶ªÆú£¬Ö±µ½Óöµ½ÏÂÒ»¸öĞĞ½áÊø·û£¬±ÜÃâ°Ñ
+ * Ò»Ìõ³¬³¤ÃüÁî²ğ³É¶àÌõÎŞĞ§ÃüÁî¡£
+ *
+ * ²ÎÊı£º
+ * byte£º¶ş½øÖÆĞ­Òé½âÎöÆ÷Î´Ïû·ÑµÄ´®¿Ú×Ö½Ú¡£
+ *
+ * ·µ»ØÖµ£º
+ * ÎŞ¡£
+ */
+static void App_UARTPractice_ProcessTextByte(uint8_t byte)
+{
+    if ((byte == '\r') || (byte == '\n'))
+    {
+        if ((s_line_overflow == 0) && (s_line_len > 0))
+        {
+            s_line_buffer[s_line_len] = '\0';
+            HandleLine(s_line_buffer);
+        }
+
+        s_line_len = 0;
+        s_line_overflow = 0;
+        return;
+    }
+
+    if (s_line_overflow != 0)
+    {
+        return;
+    }
+
+    if (s_line_len >= USART_REC_LEN)
+    {
+        s_line_len = 0;
+        s_line_overflow = 1;
+        return;
+    }
+
+    s_line_buffer[s_line_len] = (char)byte;
+    s_line_len++;
+}
+
+/*
+ * ´Ó RX »·ĞÎ»º³åÈ¡³ö²¢·Ö·¢È«²¿´ı´¦Àí×Ö½Ú¡£
+ *
+ * Ã¿¸ö×Ö½ÚÏÈ½»¸ø¶ş½øÖÆĞ­Òé×´Ì¬»ú£»Ğ­ÒéÎ´Ïû·ÑµÄ×Ö½ÚÔÙ½øÈëÎÄ±¾ĞĞ
+ * ½âÎö¡£Ğ­ÒéÈÎÎñÔÚÖ÷Ñ­»·ÉÏÏÂÎÄÖĞ¼°Ê±È¡×ßÍêÕûÖ¡£¬±ÜÃâµ¥Ö¡ pending
+ * ²ÛÔÚÒ»´Î RX ÅúÁ¿´¦ÀíÆÚ¼ä×èÈûºóĞøĞ­ÒéÖ¡¡£
+ *
+ * ²ÎÊı£º
+ * ÎŞ¡£
+ *
+ * ·µ»ØÖµ£º
+ * ÎŞ¡£
  */
 void App_UARTPractice_Task(void)
 {
-    char line[USART_REC_LEN + 1];
-    uint16_t len;
-    uint16_t i;
+    uint8_t byte;
 
-    /* æ£€æŸ¥æ˜¯å¦æ”¶åˆ°å®Œæ•´ä¸€è¡Œï¼ˆUSART_RX_STA çš„ bit15ï¼‰ */
-    if ((USART_RX_STA & UART_LINE_DONE) == 0)
+    while (UartRx_TryRead(&byte) != 0)
     {
-        return;     /* æ²¡æœ‰æ–°è¡Œï¼Œç›´æ¥è¿”å› */
-    }
-
-    /* å…³ä¸­æ–­ï¼Œå®‰å…¨åœ°ä»å…±äº«ç¼“å†²åŒºè¯»å–æ•°æ® */
-    __disable_irq();
-    len = (uint16_t)(USART_RX_STA & UART_LINE_LEN_MASK);
-
-    if (len > USART_REC_LEN)
-    {
-        len = USART_REC_LEN;
-    }
-
-    for (i = 0; i < len; i++)
-    {
-        line[i] = (char)USART_RX_BUF[i];
-    }
-
-    line[len] = '\0';
-    USART_RX_STA = 0;           /* æ¸…ç©ºæ¥æ”¶æ ‡å¿—ï¼Œå…è®¸ä¸­æ–­ç»§ç»­æ”¶ä¸‹ä¸€è¡Œ */
-    __enable_irq();              /* å¼€ä¸­æ–­ */
-
-    if (len > 0)
-    {
-        HandleLine(line);       /* è§£æå¹¶æ‰§è¡Œå‘½ä»¤ */
+        if (App_ProtocolPractice_ReceiveByte(byte) != 0)
+        {
+            App_ProtocolPractice_Task();
+        }
+        else
+        {
+            App_UARTPractice_ProcessTextByte(byte);
+        }
     }
 }

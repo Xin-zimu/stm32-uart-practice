@@ -6,8 +6,8 @@
 /*
  * Binary protocol practice module.
  *
- * USART1 interrupt should call App_ProtocolPractice_ReceiveByte() once for
- * every received byte. The main loop should call App_ProtocolPractice_Task().
+ * The main-loop RX dispatcher should call App_ProtocolPractice_ReceiveByte()
+ * once for every queued byte, then call App_ProtocolPractice_Task() regularly.
  */
 void App_ProtocolPractice_Init(void);
 uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte);

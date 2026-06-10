@@ -720,6 +720,16 @@
               <FilePath>..\SYSTEM\usart\uart_tx.h</FilePath>
             </File>
             <File>
+              <FileName>uart_rx.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\SYSTEM\usart\uart_rx.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_rx.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\SYSTEM\usart\uart_rx.h</FilePath>
+            </File>
+            <File>
               <FileName>timing.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\SYSTEM\timing\timing.c</FilePath>

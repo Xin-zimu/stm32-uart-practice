@@ -2,8 +2,8 @@
  * 文件名称：app_protocol_practice.c
  *
  * 功能说明：
- * 本文件实现 USART1 二进制通信协议。串口接收中断每收到一个字节，
- * 就调用 App_ProtocolPractice_ReceiveByte() 推进接收状态机。状态机
+ * 本文件实现 USART1 二进制通信协议。主循环从 RX 环形缓冲取出字节后，
+ * 调用 App_ProtocolPractice_ReceiveByte() 推进接收状态机。状态机
  * 找到帧头、接收各字段并完成 CRC16 校验后，只把完整帧放入 pending
  * 邮箱；具体命令由主循环中的 App_ProtocolPractice_Task() 执行。
  *
@@ -26,11 +26,11 @@
  * 固定帧头 AA 55 和 CRC 自身不参加计算。
  *
  * 中断与主循环分工：
- * - 中断：逐字节解析、长度检查、CRC 校验、完整帧入队。
- * - 主循环：命令分发、外设控制、状态读取和响应发送。
+ * - 中断：只把 USART1 DR 中的字节写入 RX 环形缓冲。
+ * - 主循环：协议解析、命令分发、外设控制和响应发送。
  *
- * 这种分工可以缩短 USART 接收中断的执行时间，避免在中断中执行
- * 较慢的业务逻辑，同时通过单帧 pending 邮箱保护帧数据的一致性。
+ * 这种分工把长度检查和 CRC 校验移出 USART 接收中断，同时通过
+ * 单帧 pending 邮箱隔离协议解析与命令执行。
  */
 
 #include "app_protocol_practice.h"    // 本模块对外接口和 STM32 基础类型
@@ -93,15 +93,15 @@ typedef struct
 } ProtocolFrame;
 
 static ProtocolRxState s_rx_state = PROTO_RX_WAIT_AA;    // 当前接收状态
-static ProtocolFrame s_rx_frame;                         // 中断侧正在组装的帧
-static volatile ProtocolFrame s_pending_frame;           // 中断交给主循环的完整帧
-static volatile uint8_t s_pending_ready = 0;              // 1 表示 pending 中有待处理帧
+static ProtocolFrame s_rx_frame;                         // 主循环接收分发器正在组装的帧
+static ProtocolFrame s_pending_frame;                    // 等待命令任务处理的完整帧
+static uint8_t s_pending_ready = 0;                       // 1 表示 pending 中有待处理帧
 static uint8_t s_data_count = 0;                          // 当前已接收的 DATA 字节数
 static uint8_t s_rx_crc_low = 0;                          // 暂存线上先到达的 CRC 低字节
 
-static volatile uint16_t s_rx_ok_count = 0;               // 成功进入 pending 的帧数
-static volatile uint16_t s_rx_error_count = 0;            // 所有接收错误的累计次数
-static volatile uint16_t s_rx_timeout_count = 0;          // 半包接收超时次数
+static uint16_t s_rx_ok_count = 0;                        // 成功进入 pending 的帧数
+static uint16_t s_rx_error_count = 0;                     // 所有接收错误的累计次数
+static uint16_t s_rx_timeout_count = 0;                   // 半包接收超时次数
 static uint32_t s_last_rx_tick = 0;                        // 最近一次收到字节的毫秒节拍
 static uint8_t s_buzzer_state = 0;                         // 蜂鸣器软件模拟状态
 
@@ -207,14 +207,14 @@ static void Protocol_CheckRxTimeout(uint32_t now_ms)
 /*
  * 将 CRC 校验成功的接收帧放入主循环 pending 邮箱。
  *
- * 本函数位于串口中断调用路径中，只进行短时间内存复制，不执行
- * 命令和串口回复。当前邮箱只有一个槽；如果上一帧还没有被主循环
+ * 本函数位于主循环的接收分发路径中，只进行帧数据复制，不执行
+ * 命令和串口回复。当前邮箱只有一个槽；如果上一帧还没有被命令任务
  * 取走，新帧不会覆盖旧帧，而是增加错误计数并被丢弃。
  *
  * 所有字段复制完成后才设置 s_pending_ready，避免主循环读取到
  * 只复制了一部分的帧。
  */
-static void Protocol_PushFrameFromIrq(void)
+static void Protocol_PushFrame(void)
 {
     uint8_t i;
 
@@ -486,7 +486,7 @@ void App_ProtocolPractice_Init(void)
 /*
  * 向协议状态机输入一个 USART 接收字节。
  *
- * 该函数通常由 USART1 接收中断调用。返回 1 表示当前字节已被
+ * 该函数由主循环中的 RX 环形缓冲分发任务调用。返回 1 表示当前字节已被
  * 二进制协议状态机接收或处理；返回 0 表示该字节不属于当前
  * 二进制帧，上层可以继续交给文本命令接收逻辑。
  *
@@ -590,7 +590,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             received_crc = (uint16_t)s_rx_crc_low | ((uint16_t)byte << 8);
             if (received_crc == Protocol_CalcFrameCrc16(&s_rx_frame))
             {
-                Protocol_PushFrameFromIrq();                // 中断中只入队，不执行命令
+                Protocol_PushFrame();                // 接收分发只投递，不执行命令
             }
             else
             {
@@ -613,11 +613,10 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
  * 在主循环中处理一帧已经通过 CRC 校验的数据。
  *
  * 主循环应持续调用本函数。没有 pending 帧时立即返回，不会阻塞
- * 其他任务。复制 volatile pending 邮箱时短暂关闭中断，确保 SEQ、
- * LEN、CMD、DATA 和 ready 标志作为一个整体被取走。
+ * 其他任务。协议接收与本任务都在主循环上下文执行，因此复制 pending
+ * 邮箱时不需要关闭中断；USART1 RXNE 中断只操作独立的 RX 环形缓冲。
  *
- * 本地副本完成后立即清除 ready 并恢复中断，具体命令处理和串口
- * 回复都在中断开启状态下执行，避免长时间阻塞 USART 接收。
+ * 本地副本完成后立即清除 ready，再执行具体命令处理和串口回复。
  */
 void App_ProtocolPractice_Task(void)
 {
@@ -631,7 +630,6 @@ void App_ProtocolPractice_Task(void)
         return;
     }
 
-    __disable_irq();
     frame.seq = s_pending_frame.seq;
     frame.len = s_pending_frame.len;
     frame.cmd = s_pending_frame.cmd;
@@ -642,7 +640,6 @@ void App_ProtocolPractice_Task(void)
     }
 
     s_pending_ready = 0;                                   // 本地副本完成，释放单帧邮箱
-    __enable_irq();
 
     Protocol_HandleFrame(&frame);
 }

@@ -1,7 +1,7 @@
 #include "sys.h"
 #include "usart.h"	  
 #include "uart_tx.h"
-#include "app_protocol_practice.h"
+#include "uart_rx.h"
 
 ////////////////////////////////////////////////////////////////////////////////// 	 
 //如果使用ucos,则包括下面的头文件即可.
@@ -64,14 +64,18 @@ int GetKey (void)  {
 #if EN_USART1_RX   //如果使能了接收
 //串口1中断服务程序
 //注意,读取USARTx->SR能避免莫名其妙的错误   	
-volatile u8 USART_RX_BUF[USART_REC_LEN];     //接收缓冲,最大USART_REC_LEN个字节.
-//接收状态
-//bit15，	接收完成标志
-//bit14，	接收到0x0d
-//bit13~0，	接收到的有效字节数目
-volatile u16 USART_RX_STA=0;       //接收状态标记	  
-  
-/* Configure USART1 on PA9/PA10 and enable RX interrupt. */
+/*
+ * 初始化 USART1、收发 GPIO、中断控制器和软件收发队列。
+ *
+ * 初始化期间先配置 PA9/PA10 和 USART1 参数，再清空 TX/RX 环形缓冲，
+ * 最后开启 RXNE 中断并使能外设，避免中断访问尚未初始化的软件状态。
+ *
+ * 参数：
+ * bound：USART1 波特率。
+ *
+ * 返回值：
+ * 无。
+ */
 void uart_init(u32 bound){
   //GPIO端口设置
   GPIO_InitTypeDef GPIO_InitStructure;
@@ -109,43 +113,38 @@ void uart_init(u32 bound){
 
   USART_Init(USART1, &USART_InitStructure); //初始化串口1
   UartTx_Init();                            //初始化非阻塞 TX 环形缓冲
+  UartRx_Init();                            //初始化中断写入的 RX 环形缓冲
   USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);//开启串口接受中断
   USART_Cmd(USART1, ENABLE);                    //使能串口1 
 
 }
 
-/* USART1 RX interrupt: binary protocol bytes are tried first, text lines second. */
-void USART1_IRQHandler(void)                	//串口1中断服务程序
-	{
-	u8 Res;
+/*
+ * 处理 USART1 接收寄存器非空和发送寄存器空中断。
+ *
+ * RXNE 路径只读取 DR 并把字节写入 RX 环形缓冲，不在中断中执行协议
+ * 状态机或文本命令解析。TXE 路径继续委托给 TX 环形缓冲处理函数。
+ * 队列满时 RX 模块会丢弃新字节并记录溢出次数，中断不会阻塞等待。
+ *
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 无。
+ */
+void USART1_IRQHandler(void)
+{
+    u8 received_byte;
 #if SYSTEM_SUPPORT_OS 		//如果SYSTEM_SUPPORT_OS为真，则需要支持OS.
 	OSIntEnter();    
 #endif
-	if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)  //接收中断(接收到的数据必须是0x0d 0x0a结尾)
-		{
-		Res =USART_ReceiveData(USART1);	//读取接收到的数据
-        /* Protocol parser returns 1 when the byte belongs to a binary frame. */
-        if(App_ProtocolPractice_ReceiveByte(Res) == 0)
-            {
-		
-		if((USART_RX_STA&0x8000)==0)//receive not complete
-			{
-			if((Res==0x0d) || (Res==0x0a))
-				{
-				if((USART_RX_STA&0X3FFF) > 0)
-					{
-					USART_RX_STA|=0x8000;
-					}
-				}
-			else
-				{
-				USART_RX_BUF[USART_RX_STA&0X3FFF]=Res ;
-				USART_RX_STA++;
-				if(USART_RX_STA>(USART_REC_LEN-1))USART_RX_STA=0;
-				}		 
-			}   		 
-            }
-     }
+    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+    {
+        received_byte = (u8)USART_ReceiveData(USART1);
+        (void)UartRx_PushFromIrq(received_byte);
+
+    }
+
     UartTx_IRQHandler();
 #if SYSTEM_SUPPORT_OS 	//如果SYSTEM_SUPPORT_OS为真，则需要支持OS.
 	OSIntExit();  											 
