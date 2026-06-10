@@ -514,7 +514,7 @@ void USART1_IRQHandler(void)
 当前入口依次处理：
 
 ```text
-1. RXNE 接收中断
+1. RXNE 接收字节写入 RX 环形缓冲
 2. TXE 发送中断
 ```
 
@@ -524,11 +524,16 @@ void USART1_IRQHandler(void)
 if (RXNE)
 {
     读取一个接收字节;
-    交给二进制协议或文本接收逻辑;
+    写入 RX 环形缓冲;
 }
 
 UartTx_IRQHandler();
 ```
+
+协议状态机和文本组行不在中断中运行。主循环中的
+`App_UartRxDispatch_Task()` 从 RX 环形缓冲取字节，先交给二进制协议
+解析器，未被协议消费的字节再交给文本解析器。完整协议帧进入 4 槽帧
+队列，完整文本行进入 2 槽行队列，业务任务随后逐条执行。
 
 `UartTx_IRQHandler()` 内部会自行判断：
 

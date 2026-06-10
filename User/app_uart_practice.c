@@ -1,14 +1,38 @@
+#ifdef UART_RX_PIPELINE_HOST_TEST
+#include <stdint.h>
+#include <stdio.h>
+#else
 #include "app_uart_practice.h"
 #include "app_light.h"
 #include "app_temp.h"
-#include "app_protocol_practice.h"
-#include "uart_rx.h"
 #include "usart.h"
 #include <stdio.h>
+#endif
 
-static char s_line_buffer[USART_REC_LEN + 1];
-static uint16_t s_line_len = 0;
-static uint8_t s_line_overflow = 0;
+#ifndef USART_REC_LEN
+#define USART_REC_LEN                   200u
+#endif
+
+#ifndef APP_UART_TEXT_FEED_NONE
+#define APP_UART_TEXT_FEED_NONE         0u
+#define APP_UART_TEXT_FEED_LINE_END     1u
+#endif
+
+#define UART_LINE_QUEUE_SIZE            2u
+
+typedef struct
+{
+    char text[USART_REC_LEN + 1];               // 包含字符串结束符的完整文本行
+} UartLineEntry;
+
+static char s_line_buffer[USART_REC_LEN + 1];   // 当前正在组装的文本行
+static uint16_t s_line_len = 0;                 // 当前文本行长度
+static uint8_t s_line_overflow = 0;             // 1 表示当前行超长，等待行结束符
+static UartLineEntry s_line_queue[UART_LINE_QUEUE_SIZE]; // 等待业务任务处理的完整行
+static uint8_t s_line_queue_head = 0;            // 下一行写入位置
+static uint8_t s_line_queue_tail = 0;            // 下一行读取位置
+static uint8_t s_line_queue_count = 0;           // 当前完整行数量
+static uint16_t s_line_drop_count = 0;           // 行队列满或超长导致的丢弃次数
 
 /**
  * StrEqual - 判断两个字符串是否完全相等
@@ -464,10 +488,49 @@ static void HandleLine(char *line)
 }
 
 /*
+ * 将当前已经组装完成的文本行放入完整行队列。
+ *
+ * 队列包含 2 个槽位。队列满时保留已有命令，丢弃新行并增加丢弃
+ * 计数。复制完成后才推进写索引，因此业务任务只会看到完整字符串。
+ *
+ * 参数：
+ * 无，数据来自 s_line_buffer 和 s_line_len。
+ *
+ * 返回值：
+ * 无。
+ */
+static void App_UARTPractice_PushLine(void)
+{
+    UartLineEntry *target;
+    uint16_t i;
+
+    if (s_line_queue_count >= UART_LINE_QUEUE_SIZE)
+    {
+        s_line_drop_count++;
+        return;
+    }
+
+    target = &s_line_queue[s_line_queue_head];
+    for (i = 0; i < s_line_len; i++)
+    {
+        target->text[i] = s_line_buffer[i];
+    }
+    target->text[s_line_len] = '\0';
+
+    s_line_queue_head++;
+    if (s_line_queue_head >= UART_LINE_QUEUE_SIZE)
+    {
+        s_line_queue_head = 0;
+    }
+    s_line_queue_count++;
+}
+
+/*
  * 初始化串口文本命令接收状态并打印欢迎信息。
  *
- * RX 环形缓冲由 uart_init() 在开启 RXNE 中断前初始化。本函数只复位
- * 文本行的组包状态，保证应用重新初始化后不会继续处理旧的半行数据。
+ * RX 环形缓冲由 uart_init() 在开启 RXNE 中断前初始化。本函数复位
+ * 文本组包状态、完整行队列和丢弃计数，保证重新初始化后不会处理旧
+ * 数据。
  *
  * 参数：
  * 无。
@@ -479,6 +542,10 @@ void App_UARTPractice_Init(void)
 {
     s_line_len = 0;
     s_line_overflow = 0;
+    s_line_queue_head = 0;
+    s_line_queue_tail = 0;
+    s_line_queue_count = 0;
+    s_line_drop_count = 0;
 
     printf("\r\nSTM32F103 UART practice ready.\r\n");
     printf("USART1: PA9=TX, PA10=RX, 115200 8N1.\r\n");
@@ -488,53 +555,59 @@ void App_UARTPractice_Init(void)
 /*
  * 将一个非协议字节加入文本命令行。
  *
- * CR 或 LF 结束当前行；连续的 CRLF 不会产生空命令。超过
- * USART_REC_LEN 的行会被整行丢弃，直到遇到下一个行结束符，避免把
- * 一条超长命令拆成多条无效命令。
+ * CR 或 LF 结束当前行；连续的 CRLF 不会产生空命令。完整行只写入
+ * 行队列，不在本函数中执行业务。超过 USART_REC_LEN 的行会被整行
+ * 丢弃到下一个结束符，并增加文本行丢弃计数。
  *
  * 参数：
  * byte：二进制协议解析器未消费的串口字节。
  *
  * 返回值：
- * 无。
+ * APP_UART_TEXT_FEED_LINE_END：一条完整或被丢弃的行已经结束。
+ * APP_UART_TEXT_FEED_NONE：当前字节没有结束文本行。
  */
-static void App_UARTPractice_ProcessTextByte(uint8_t byte)
+uint8_t App_UARTPractice_FeedByte(uint8_t byte)
 {
     if ((byte == '\r') || (byte == '\n'))
     {
         if ((s_line_overflow == 0) && (s_line_len > 0))
         {
-            s_line_buffer[s_line_len] = '\0';
-            HandleLine(s_line_buffer);
+            App_UARTPractice_PushLine();
         }
 
-        s_line_len = 0;
-        s_line_overflow = 0;
-        return;
+        if ((s_line_len > 0) || (s_line_overflow != 0))
+        {
+            s_line_len = 0;
+            s_line_overflow = 0;
+            return APP_UART_TEXT_FEED_LINE_END;
+        }
+
+        return APP_UART_TEXT_FEED_NONE;
     }
 
     if (s_line_overflow != 0)
     {
-        return;
+        return APP_UART_TEXT_FEED_NONE;
     }
 
     if (s_line_len >= USART_REC_LEN)
     {
         s_line_len = 0;
         s_line_overflow = 1;
-        return;
+        s_line_drop_count++;
+        return APP_UART_TEXT_FEED_NONE;
     }
 
     s_line_buffer[s_line_len] = (char)byte;
     s_line_len++;
+    return APP_UART_TEXT_FEED_NONE;
 }
 
 /*
- * 从 RX 环形缓冲取出并分发全部待处理字节。
+ * 执行完整行队列中最早的一条文本命令。
  *
- * 每个字节先交给二进制协议状态机；协议未消费的字节再进入文本行
- * 解析。协议任务在主循环上下文中及时取走完整帧，避免单帧 pending
- * 槽在一次 RX 批量处理期间阻塞后续协议帧。
+ * RX 分发任务只负责组行和入队。本任务每次最多复制并执行一条完整
+ * 命令，随后让出 CPU；如果队列为空则立即返回。
  *
  * 参数：
  * 无。
@@ -544,17 +617,60 @@ static void App_UARTPractice_ProcessTextByte(uint8_t byte)
  */
 void App_UARTPractice_Task(void)
 {
-    uint8_t byte;
+    char line[USART_REC_LEN + 1];
+    UartLineEntry *source;
+    uint16_t i;
 
-    while (UartRx_TryRead(&byte) != 0)
+    if (s_line_queue_count == 0)
     {
-        if (App_ProtocolPractice_ReceiveByte(byte) != 0)
+        return;
+    }
+
+    source = &s_line_queue[s_line_queue_tail];
+    for (i = 0; i <= USART_REC_LEN; i++)
+    {
+        line[i] = source->text[i];
+        if (source->text[i] == '\0')
         {
-            App_ProtocolPractice_Task();
-        }
-        else
-        {
-            App_UARTPractice_ProcessTextByte(byte);
+            break;
         }
     }
+    line[USART_REC_LEN] = '\0';
+
+    s_line_queue_tail++;
+    if (s_line_queue_tail >= UART_LINE_QUEUE_SIZE)
+    {
+        s_line_queue_tail = 0;
+    }
+    s_line_queue_count--;
+
+    HandleLine(line);
+}
+
+/*
+ * 返回当前等待业务处理的完整文本行数量。
+ *
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 0 到 UART_LINE_QUEUE_SIZE 之间的队列长度。
+ */
+uint8_t App_UARTPractice_GetLineQueueCount(void)
+{
+    return s_line_queue_count;
+}
+
+/*
+ * 返回因文本行过长或完整行队列已满造成的丢弃次数。
+ *
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 当前文本行丢弃计数，超过 65535 后自然回绕。
+ */
+uint16_t App_UARTPractice_GetLineDropCount(void)
+{
+    return s_line_drop_count;
 }

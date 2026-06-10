@@ -4,8 +4,8 @@
  * 功能说明：
  * 本文件实现 USART1 二进制通信协议。主循环从 RX 环形缓冲取出字节后，
  * 调用 App_ProtocolPractice_ReceiveByte() 推进接收状态机。状态机
- * 找到帧头、接收各字段并完成 CRC16 校验后，只把完整帧放入 pending
- * 邮箱；具体命令由主循环中的 App_ProtocolPractice_Task() 执行。
+ * 找到帧头、接收各字段并完成 CRC16 校验后，把完整帧放入 4 槽
+ * 队列；具体命令由主循环中的 App_ProtocolPractice_Task() 执行。
  *
  * 正式帧格式：
  *
@@ -30,20 +30,32 @@
  * - 主循环：协议解析、命令分发、外设控制和响应发送。
  *
  * 这种分工把长度检查和 CRC 校验移出 USART 接收中断，同时通过
- * 单帧 pending 邮箱隔离协议解析与命令执行。
+ * 完整帧队列隔离协议解析与命令执行。
  */
 
+#ifdef UART_RX_PIPELINE_HOST_TEST
+#include <stdint.h>
+#include <stdio.h>
+#else
 #include "app_protocol_practice.h"    // 本模块对外接口和 STM32 基础类型
 #include "app_light.h"                // 交通灯控制、AO 值和亮暗状态接口
 #include "timing.h"                   // 毫秒节拍，用于接收半包超时判断
 #include "uart_tx.h"                  // USART1 TX 环形缓冲和整块入队接口
 #include <stdio.h>                    // printf 初始化提示
+#endif
+
+#ifndef APP_PROTOCOL_FEED_TEXT
+#define APP_PROTOCOL_FEED_TEXT          0u
+#define APP_PROTOCOL_FEED_CONSUMED      1u
+#define APP_PROTOCOL_FEED_FRAME_END     2u
+#endif
 
 #define PROTO_HEAD_1             0xAA        // 固定帧头第一个字节
 #define PROTO_HEAD_2             0x55        // 固定帧头第二个字节
 #define PROTO_MAX_DATA_LEN       16          // DATA 最大长度，也是接收数组容量
 #define PROTO_MAX_FRAME_LEN      (7u + PROTO_MAX_DATA_LEN) // 完整帧最大字节数
 #define PROTO_RX_TIMEOUT_MS      50u         // 相邻接收字节最大允许间隔，单位 ms
+#define PROTO_FRAME_QUEUE_SIZE   4u          // 完整协议帧队列槽数
 
 #define PROTO_CMD_PING           0x01        // 通信测试，DATA 必须为空
 #define PROTO_CMD_LED            0x02        // 设置交通灯模式
@@ -57,7 +69,7 @@
 #define PROTO_ERR_BAD_LEN        0x01        // DATA 长度不符合命令要求
 #define PROTO_ERR_BAD_PARAM      0x02        // DATA 参数值非法
 #define PROTO_ERR_UNKNOWN_CMD    0x03        // 未定义命令
-#define PROTO_ERR_RX_BUSY        0x04        // 接收邮箱忙，保留给后续扩展
+#define PROTO_ERR_RX_BUSY        0x04        // 接收队列忙，保留给后续扩展
 
 /*
  * 接收状态枚举。
@@ -94,12 +106,15 @@ typedef struct
 
 static ProtocolRxState s_rx_state = PROTO_RX_WAIT_AA;    // 当前接收状态
 static ProtocolFrame s_rx_frame;                         // 主循环接收分发器正在组装的帧
-static ProtocolFrame s_pending_frame;                    // 等待命令任务处理的完整帧
-static uint8_t s_pending_ready = 0;                       // 1 表示 pending 中有待处理帧
+static ProtocolFrame s_frame_queue[PROTO_FRAME_QUEUE_SIZE]; // 等待业务任务处理的完整帧
+static uint8_t s_frame_queue_head = 0;                    // 下一帧写入位置
+static uint8_t s_frame_queue_tail = 0;                    // 下一帧读取位置
+static uint8_t s_frame_queue_count = 0;                   // 当前完整帧数量
 static uint8_t s_data_count = 0;                          // 当前已接收的 DATA 字节数
 static uint8_t s_rx_crc_low = 0;                          // 暂存线上先到达的 CRC 低字节
 
-static uint16_t s_rx_ok_count = 0;                        // 成功进入 pending 的帧数
+static uint16_t s_frame_drop_count = 0;                   // 完整帧队列满丢弃次数
+static uint16_t s_rx_ok_count = 0;                        // 成功进入完整帧队列的帧数
 static uint16_t s_rx_error_count = 0;                     // 所有接收错误的累计次数
 static uint16_t s_rx_timeout_count = 0;                   // 半包接收超时次数
 static uint32_t s_last_rx_tick = 0;                        // 最近一次收到字节的毫秒节拍
@@ -205,35 +220,47 @@ static void Protocol_CheckRxTimeout(uint32_t now_ms)
 }
 
 /*
- * 将 CRC 校验成功的接收帧放入主循环 pending 邮箱。
+ * 将 CRC 校验成功的接收帧放入完整帧队列。
  *
- * 本函数位于主循环的接收分发路径中，只进行帧数据复制，不执行
- * 命令和串口回复。当前邮箱只有一个槽；如果上一帧还没有被命令任务
- * 取走，新帧不会覆盖旧帧，而是增加错误计数并被丢弃。
+ * 本函数只复制协议数据，不执行命令或发送回复。队列包含 4 个独立
+ * 槽位，允许接收分发任务连续解析多帧。队列满时保留已有帧，丢弃
+ * 新帧，并同时增加帧丢弃计数和接收错误计数。
  *
- * 所有字段复制完成后才设置 s_pending_ready，避免主循环读取到
- * 只复制了一部分的帧。
+ * 参数：
+ * 无，数据来自当前已经完成 CRC 校验的 s_rx_frame。
+ *
+ * 返回值：
+ * 无。
  */
 static void Protocol_PushFrame(void)
 {
+    ProtocolFrame *target;
     uint8_t i;
 
-    if (s_pending_ready != 0)
+    if (s_frame_queue_count >= PROTO_FRAME_QUEUE_SIZE)
     {
+        s_frame_drop_count++;
         s_rx_error_count++;
         return;
     }
 
-    s_pending_frame.seq = s_rx_frame.seq;
-    s_pending_frame.len = s_rx_frame.len;
-    s_pending_frame.cmd = s_rx_frame.cmd;
+    target = &s_frame_queue[s_frame_queue_head];
+    target->seq = s_rx_frame.seq;
+    target->len = s_rx_frame.len;
+    target->cmd = s_rx_frame.cmd;
 
     for (i = 0; i < s_rx_frame.len; i++)
     {
-        s_pending_frame.data[i] = s_rx_frame.data[i];
+        target->data[i] = s_rx_frame.data[i];
     }
 
-    s_pending_ready = 1;
+    s_frame_queue_head++;
+    if (s_frame_queue_head >= PROTO_FRAME_QUEUE_SIZE)
+    {
+        s_frame_queue_head = 0;
+    }
+
+    s_frame_queue_count++;
     s_rx_ok_count++;
 }
 
@@ -467,13 +494,16 @@ static void Protocol_HandleFrame(const ProtocolFrame *frame)
  * 初始化二进制协议模块。
  *
  * 应在系统节拍和 USART 初始化完成后调用一次。该函数复位状态机、
- * 清空 pending 标志和所有统计计数，并将蜂鸣器软件状态初始化为
- * 关闭。初始化结束后通过 printf 输出协议模块就绪提示。
+ * 清空完整帧队列和所有统计计数，并将蜂鸣器软件状态初始化为关闭。
+ * 初始化结束后通过 printf 输出协议模块就绪提示。
  */
 void App_ProtocolPractice_Init(void)
 {
     Protocol_ResetRx();
-    s_pending_ready = 0;
+    s_frame_queue_head = 0;
+    s_frame_queue_tail = 0;
+    s_frame_queue_count = 0;
+    s_frame_drop_count = 0;
     s_rx_ok_count = 0;
     s_rx_error_count = 0;
     s_rx_timeout_count = 0;
@@ -486,16 +516,17 @@ void App_ProtocolPractice_Init(void)
 /*
  * 向协议状态机输入一个 USART 接收字节。
  *
- * 该函数由主循环中的 RX 环形缓冲分发任务调用。返回 1 表示当前字节已被
- * 二进制协议状态机接收或处理；返回 0 表示该字节不属于当前
- * 二进制帧，上层可以继续交给文本命令接收逻辑。
+ * 该函数由独立 RX 分发任务调用。APP_PROTOCOL_FEED_TEXT 表示字节
+ * 不属于二进制帧，可继续交给文本解析器；APP_PROTOCOL_FEED_CONSUMED
+ * 表示帧仍在接收；APP_PROTOCOL_FEED_FRAME_END 表示一帧已经完成
+ * 或因 CRC 错误结束，分发任务应让业务任务获得运行机会。
  *
  * 处理步骤：
  * 1. 先使用上一次接收时间检查半包是否超时。
  * 2. 更新最近一次接收时间。
  * 3. 根据当前状态解释本次字节并切换到下一状态。
  * 4. CRC 高字节到达后组合线上 CRC，与本地计算结果比较。
- * 5. CRC 正确时把完整帧放入 pending，随后复位接收状态机。
+ * 5. CRC 正确时把完整帧放入帧队列，随后复位接收状态机。
  *
  * WAIT_55 状态支持 AA AA 55 重同步：第二个 AA 可以作为新帧头
  * 的起点。LEN 在写入 DATA 数组之前会先检查最大长度，避免越界。
@@ -514,7 +545,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             if (byte == PROTO_HEAD_1)
             {
                 s_rx_state = PROTO_RX_WAIT_55;
-                return 1;
+                return APP_PROTOCOL_FEED_CONSUMED;
             }
             break;
 
@@ -522,12 +553,12 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             if (byte == PROTO_HEAD_2)
             {
                 s_rx_state = PROTO_RX_WAIT_SEQ;
-                return 1;
+                return APP_PROTOCOL_FEED_CONSUMED;
             }
             else if (byte == PROTO_HEAD_1)
             {
                 s_rx_state = PROTO_RX_WAIT_55;              // AA AA 55 重同步
-                return 1;
+                return APP_PROTOCOL_FEED_CONSUMED;
             }
             else
             {
@@ -538,7 +569,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
         case PROTO_RX_WAIT_SEQ:
             s_rx_frame.seq = byte;
             s_rx_state = PROTO_RX_WAIT_LEN;
-            return 1;
+            return APP_PROTOCOL_FEED_CONSUMED;
 
         case PROTO_RX_WAIT_LEN:
             s_rx_frame.len = byte;
@@ -548,12 +579,11 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             {
                 s_rx_error_count++;
                 Protocol_ResetRx();
+                return APP_PROTOCOL_FEED_FRAME_END;
             }
-            else
-            {
-                s_rx_state = PROTO_RX_WAIT_CMD;
-            }
-            return 1;
+
+            s_rx_state = PROTO_RX_WAIT_CMD;
+            return APP_PROTOCOL_FEED_CONSUMED;
 
         case PROTO_RX_WAIT_CMD:
             s_rx_frame.cmd = byte;
@@ -566,7 +596,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             {
                 s_rx_state = PROTO_RX_WAIT_DATA;
             }
-            return 1;
+            return APP_PROTOCOL_FEED_CONSUMED;
 
         case PROTO_RX_WAIT_DATA:
             s_rx_frame.data[s_data_count] = byte;
@@ -576,12 +606,12 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             {
                 s_rx_state = PROTO_RX_WAIT_CRC_LO;
             }
-            return 1;
+            return APP_PROTOCOL_FEED_CONSUMED;
 
         case PROTO_RX_WAIT_CRC_LO:
             s_rx_crc_low = byte;
             s_rx_state = PROTO_RX_WAIT_CRC_HI;
-            return 1;
+            return APP_PROTOCOL_FEED_CONSUMED;
 
         case PROTO_RX_WAIT_CRC_HI:
         {
@@ -598,7 +628,7 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             }
 
             Protocol_ResetRx();
-            return 1;
+            return APP_PROTOCOL_FEED_FRAME_END;
         }
 
         default:
@@ -606,49 +636,88 @@ uint8_t App_ProtocolPractice_ReceiveByte(uint8_t byte)
             break;
     }
 
-    return 0;
+    return APP_PROTOCOL_FEED_TEXT;
 }
 
 /*
  * 在主循环中处理一帧已经通过 CRC 校验的数据。
  *
- * 主循环应持续调用本函数。没有 pending 帧时立即返回，不会阻塞
- * 其他任务。协议接收与本任务都在主循环上下文执行，因此复制 pending
- * 邮箱时不需要关闭中断；USART1 RXNE 中断只操作独立的 RX 环形缓冲。
+ * 主循环应持续调用本函数。没有完整帧时立即返回；有数据时只取出并
+ * 执行队列中最早的一帧，随后让出 CPU。接收分发与业务执行通过帧
+ * 队列解耦，连续到达的协议帧不会覆盖仍在等待执行的旧帧。
  *
- * 本地副本完成后立即清除 ready，再执行具体命令处理和串口回复。
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 无。
  */
 void App_ProtocolPractice_Task(void)
 {
     ProtocolFrame frame;
+    ProtocolFrame *source;
     uint8_t i;
 
     Protocol_CheckRxTimeout(Timing_GetTick());              // 无新字节时也能清理超时半包
 
-    if (s_pending_ready == 0)
+    if (s_frame_queue_count == 0)
     {
         return;
     }
 
-    frame.seq = s_pending_frame.seq;
-    frame.len = s_pending_frame.len;
-    frame.cmd = s_pending_frame.cmd;
+    source = &s_frame_queue[s_frame_queue_tail];
+    frame.seq = source->seq;
+    frame.len = source->len;
+    frame.cmd = source->cmd;
 
-    for (i = 0; i < s_pending_frame.len; i++)
+    for (i = 0; i < source->len; i++)
     {
-        frame.data[i] = s_pending_frame.data[i];
+        frame.data[i] = source->data[i];
     }
 
-    s_pending_ready = 0;                                   // 本地副本完成，释放单帧邮箱
+    s_frame_queue_tail++;
+    if (s_frame_queue_tail >= PROTO_FRAME_QUEUE_SIZE)
+    {
+        s_frame_queue_tail = 0;
+    }
+    s_frame_queue_count--;
 
     Protocol_HandleFrame(&frame);
 }
 
 /*
+ * 返回当前等待业务处理的完整协议帧数量。
+ *
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 0 到 PROTO_FRAME_QUEUE_SIZE 之间的队列长度。
+ */
+uint8_t App_ProtocolPractice_GetQueueCount(void)
+{
+    return s_frame_queue_count;
+}
+
+/*
+ * 返回因完整帧队列已满而丢弃的帧数。
+ *
+ * 参数：
+ * 无。
+ *
+ * 返回值：
+ * 当前帧队列丢弃计数，超过 65535 后自然回绕。
+ */
+uint16_t App_ProtocolPractice_GetFrameDropCount(void)
+{
+    return s_frame_drop_count;
+}
+
+/*
  * 返回成功接收帧数。
  *
- * 只有 CRC 正确且成功放入 pending 邮箱的帧才会计数。CRC 正确但
- * pending 邮箱忙而被丢弃的帧不会计入成功数。
+ * 只有 CRC 正确且成功放入完整帧队列的帧才会计数。CRC 正确但
+ * 队列已满而被丢弃的帧不会计入成功数。
  */
 uint16_t App_ProtocolPractice_GetRxOkCount(void)
 {
@@ -658,7 +727,7 @@ uint16_t App_ProtocolPractice_GetRxOkCount(void)
 /*
  * 返回接收错误总数。
  *
- * 当前包括 LEN 超限、CRC 校验失败、半包超时和 pending 邮箱忙。
+ * 当前包括 LEN 超限、CRC 校验失败、半包超时和完整帧队列已满。
  */
 uint16_t App_ProtocolPractice_GetRxErrorCount(void)
 {

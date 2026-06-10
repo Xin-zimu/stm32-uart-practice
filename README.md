@@ -15,11 +15,13 @@
 | --- | --- | --- |
 | USART1 初始化 | `SYSTEM/usart/usart.c` | PA9 为 TX，PA10 为 RX，115200 8N1，开启接收中断 |
 | `printf` 重定向 | `SYSTEM/usart/usart.c` | 将 `printf` 输出重定向到 USART1，方便调试 |
-| 中断接收字节 | `SYSTEM/usart/usart.c` | 每收到 1 字节进入 `USART1_IRQHandler` |
+| 中断接收字节 | `SYSTEM/usart/usart.c` | 每收到 1 字节只读取 DR 并写入 RX 环形缓冲 |
 | 非阻塞串口发送 | `SYSTEM/usart/uart_tx.c` | 256 字节 TX 环形缓冲，由 TXE 中断逐字节发送 |
-| 文本行接收 | `SYSTEM/usart/usart.c`、`User/app_uart_practice.c` | 以 CR/LF 作为一行结束，主循环解析完整命令 |
+| 非阻塞串口接收 | `SYSTEM/usart/uart_rx.c` | 256 字节 RX 环形缓冲，中断写入、主循环读取 |
+| RX 字节分发 | `User/app_uart_rx_dispatch.c` | 主循环先喂二进制解析器，非协议字节再喂文本解析器 |
+| 文本行接收 | `User/app_uart_practice.c` | 以 CR/LF 结束，2 槽完整行队列与业务执行解耦 |
 | 文本命令解析 | `User/app_uart_practice.c` | 支持大小写兼容、参数解析、命令表分发 |
-| 二进制协议状态机 | `User/app_protocol_practice.c` | 按 `AA 55 SEQ LEN CMD DATA CRC_LO CRC_HI` 逐字节解析 |
+| 二进制协议状态机 | `User/app_protocol_practice.c` | 逐字节解析并写入 4 槽完整帧队列 |
 | CRC16 | `User/app_protocol_practice.c` | 使用 CRC-16/Modbus 校验帧内容 |
 | ACK 和错误码 | `User/app_protocol_practice.c` | 每条命令返回 ACK，携带原命令和执行结果 |
 | SEQ 序列号 | `User/app_protocol_practice.c`、`Tools/uart_protocol_host.py` | 上位机发起 SEQ，STM32 原样带回，防止响应错配 |
@@ -166,24 +168,39 @@ AA 55 03 02 80 02 00 61 30
 
 ## 串口接收流程
 
-USART1 中断里每次只处理一个字节：
+USART1 中断只搬运字节：
 
 ```c
-Res = USART_ReceiveData(USART1);
-if (App_ProtocolPractice_ReceiveByte(Res) == 0)
+if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
 {
-    /* 不是二进制协议帧时，再进入文本行接收逻辑 */
+    byte = (uint8_t)USART_ReceiveData(USART1);
+    UartRx_PushFromIrq(byte);
+}
+
+UartTx_IRQHandler();
+```
+
+主循环中的独立分发任务再解析字节：
+
+```c
+while (UartRx_TryRead(&byte))
+{
+    result = App_ProtocolPractice_ReceiveByte(byte);
+
+    if (result == APP_PROTOCOL_FEED_TEXT)
+    {
+        App_UARTPractice_FeedByte(byte);
+    }
 }
 ```
 
-设计思路：
+职责分层：
 
-1. 如果字节属于 `AA 55 ...` 二进制协议帧，交给协议状态机。
-2. 如果不是协议帧，继续按普通文本行收进 `USART_RX_BUF`。
-3. 文本命令不在中断里执行，主循环中的 `App_UARTPractice_Task()` 处理完整一行。
-4. 二进制协议命令也不在中断里执行，中断只把完整帧放到 pending 区，主循环中的 `App_ProtocolPractice_Task()` 再执行命令。
-
-这样做可以避免在中断里执行复杂业务逻辑，也方便同时练习文本串口和二进制协议。
+1. 中断层只读 DR、写 RX 环形缓冲、处理 TXE，不解析协议。
+2. 分发层在主循环中按字节推进二进制和文本解析器，不执行业务。
+3. 二进制解析完成后写入 4 槽帧队列；文本组行完成后写入 2 槽行队列。
+4. `App_ProtocolPractice_Task()` 和 `App_UARTPractice_Task()` 每次分别执行一条完整消息。
+5. 两个完整消息队列都有独立丢弃计数，队列满时保留旧消息并丢弃新消息。
 
 ## 上位机脚本
 
@@ -265,6 +282,23 @@ gcc 练习\uart_tx_test_host.c -o 练习\output\uart_tx_test_host.exe
 该测试验证整块入队、协议保留空间、队列满时整块拒绝、缓冲区回绕、
 发送顺序以及队列为空后自动关闭 TXE 中断。
 
+RX 分层与完整消息队列测试：
+
+```powershell
+gcc 练习\uart_rx_pipeline_test_host.c -std=gnu99 `
+  -finput-charset=CP936 -fexec-charset=CP936 `
+  -o 练习\output\uart_rx_pipeline_test_host.exe
+练习\output\uart_rx_pipeline_test_host.exe
+```
+
+该测试直接组合生产代码中的 RX 环形缓冲、字节分发器、协议解析器和
+文本解析器，覆盖连续 5 帧、协议帧 FIFO、文本行 FIFO、队列满丢弃以及
+文本/二进制混合字节流。期望结尾为：
+
+```text
+ALL UART RX PIPELINE TESTS PASSED
+```
+
 ## 其他外设功能
 
 虽然项目主线是串口通信，但外设提供了真实控制对象和状态数据。
@@ -306,12 +340,14 @@ while (1)
     App_Temp_Task();
     Joystick_Task();
     App_UI_Task();
+    App_UartRxDispatch_Task();
     App_UARTPractice_Task();
     App_ProtocolPractice_Task();
 }
 ```
 
-这是一个非阻塞任务轮询结构。串口中断负责接收字节和从 TX 环形缓冲发送字节，真正的命令执行和界面刷新都放在主循环任务中。
+这是一个非阻塞任务轮询结构。串口中断只搬运 RX/TX 字节；解析器和业务
+任务均在主循环运行，并通过完整消息队列解耦。
 
 ## 软件结构
 
@@ -319,12 +355,14 @@ while (1)
 SYSTEM/usart/
   usart.c/.h              USART1 初始化、printf 重定向、统一收发中断
   uart_tx.c/.h            TX 环形缓冲、整块入队和 TXE 中断发送
+  uart_rx.c/.h            RX 环形缓冲、中断入队和主循环出队
 
 Tools/
   uart_protocol_host.py   二进制协议上位机脚本
 
 User/
   main.c                  初始化和主循环
+  app_uart_rx_dispatch.c/.h RX 字节分发任务
   app_uart_practice.c/.h  文本串口命令练习
   app_protocol_practice.c/.h 二进制协议练习
   app_light.c/.h          光照状态、阈值、交通灯模式
@@ -340,6 +378,7 @@ User/
 练习/
   practice                简化版协议练习代码
   protocol_test_host.c    PC 端协议测试程序
+  uart_rx_pipeline_test_host.c RX 分层和完整消息队列测试
   protocol_document.md    协议学习文档
 ```
 
@@ -355,6 +394,8 @@ Project/led.uvprojx
 
 - `SYSTEM/usart/usart.c`
 - `SYSTEM/usart/uart_tx.c`
+- `SYSTEM/usart/uart_rx.c`
+- `User/app_uart_rx_dispatch.c`
 - `User/app_uart_practice.c`
 - `User/app_protocol_practice.c`
 - `User/app_light.c`

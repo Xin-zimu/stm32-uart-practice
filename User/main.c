@@ -10,6 +10,7 @@
 #include "joystick.h"
 #include "app_ui.h"
 #include "usart.h"
+#include "app_uart_rx_dispatch.h"
 #include "app_uart_practice.h"
 #include "app_protocol_practice.h"
 
@@ -53,6 +54,7 @@ int main(void)
         App_Temp_Task();
         Joystick_Task();
         App_UI_Task();
+        App_UartRxDispatch_Task();
         App_UARTPractice_Task();
         App_ProtocolPractice_Task();
     }

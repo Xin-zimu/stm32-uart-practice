@@ -3,14 +3,14 @@
 
 #include "stm32f10x.h"
 
+#define APP_UART_TEXT_FEED_NONE         0u      // No complete text line was produced
+#define APP_UART_TEXT_FEED_LINE_END     1u      // A complete or discarded line ended
+
 /* 打印串口练习欢迎信息。USART1 初始化由 main.c 调用 uart_init() 完成。 */
 void App_UARTPractice_Init(void);
-
-/*
- * 串口命令任务。
- * 接收中断只把字节写入 RX 环形缓冲，本函数在主循环中完成协议分发
- * 和文本命令组行。
- */
+uint8_t App_UARTPractice_FeedByte(uint8_t byte);
 void App_UARTPractice_Task(void);
+uint8_t App_UARTPractice_GetLineQueueCount(void);
+uint16_t App_UARTPractice_GetLineDropCount(void);
 
 #endif
